@@ -1,0 +1,10 @@
+{
+  "name": "discourse-video-shorts",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "eslint": "sh -c 'root=../..; [ -f ../discourse/package.json ] && root=../discourse; cd \"$root\" && pnpm eslint \"$@\"' --",
+    "prettier": "sh -c 'root=../..; [ -f ../discourse/package.json ] && root=../discourse; cd \"$root\" && pnpm prettier \"$@\"' --",
+    "stylelint": "sh -c 'root=../..; [ -f ../discourse/package.json ] && root=../discourse; cd \"$root\" && pnpm stylelint \"$@\"' --"
+  }
+}

@@ -1,0 +1,23 @@
+plugins:
+  video_shorts_enabled:
+    default: true
+    client: true
+  video_shorts_source_category_ids:
+    default: ""
+    type: list
+  video_shorts_source_tag_names:
+    default: ""
+    type: list
+  video_shorts_excerpt_character_limit:
+    default: 120
+    min: 1
+    client: true
+  video_shorts_page_size:
+    default: 20
+    min: 1
+  video_shorts_candidate_scan_limit:
+    default: 500
+    min: 1
+  video_shorts_debug_mode:
+    default: false
+    client: false

@@ -1,0 +1,223 @@
+.video-shorts-mobile-back {
+  display: none;
+}
+
+@media (width < 1024px) {
+  html:has(body.video-shorts-route) {
+    background: var(--secondary);
+  }
+
+  body.video-shorts-route,
+  body.video-shorts-route #main,
+  body.video-shorts-route .discourse-root,
+  body.video-shorts-route #main-outlet-wrapper,
+  body.video-shorts-route #main-outlet,
+  body.video-shorts-route .video-shorts-feed,
+  body.video-shorts-route .video-shorts-feed__viewport,
+  body.video-shorts-route .video-shorts-feed__items,
+  body.video-shorts-route .video-shorts-feed__item,
+  body.video-shorts-route .video-shorts-item {
+    background: var(--secondary);
+  }
+
+  body.video-shorts-route .footer-nav,
+  body.video-shorts-route .footer-nav.visible,
+  body.video-shorts-route .footer-nav-widget,
+  body.video-shorts-route .f-nav,
+  body.video-shorts-route .x-bottom-tabs,
+  body.video-shorts-route [data-mobile-navigation-tabs] {
+    display: none !important;
+  }
+
+  body.video-shorts-route .video-shorts-mobile-back {
+    position: fixed;
+    top: max(0.75rem, env(safe-area-inset-top));
+    left: max(0.75rem, env(safe-area-inset-left));
+    z-index: 10001;
+    display: grid;
+    place-items: center;
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+    padding: 0;
+    border-radius: 999px;
+    color: var(--secondary);
+    background: color-mix(in srgb, var(--primary) 38%, transparent);
+    box-shadow: 0 1px 3px rgb(0 0 0 / 0.24);
+  }
+
+  body.video-shorts-route .video-shorts-mobile-back .d-icon {
+    width: 1.15rem;
+    height: 1.15rem;
+  }
+}
+
+@media (width >= 1024px) {
+  body.video-shorts-route {
+    background: var(--secondary);
+  }
+
+  body.video-shorts-route .video-shorts-feed {
+    --video-shorts-feed-height: calc(100dvh - var(--header-offset, 4em) - 7rem);
+    --video-shorts-stage-width: min(440px, 50dvh);
+    background: var(--secondary);
+  }
+
+  body.video-shorts-route .video-shorts-feed__viewport {
+    box-sizing: border-box;
+    width: min(calc(100% - 8rem), 980px);
+    max-width: 100%;
+    min-height: 560px;
+    transition: grid-template-columns 240ms cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  body.video-shorts-route
+    .video-shorts-feed__viewport:has(.video-shorts-comments-panel) {
+    width: min(calc(100% - 8rem), 1240px);
+  }
+
+  body.video-shorts-route.has-sidebar-page .video-shorts-feed__viewport {
+    margin-inline: auto;
+  }
+
+  body.video-shorts-route.has-sidebar-page .video-shorts-feed__viewport {
+    width: min(calc(100% - 2rem), 980px);
+  }
+
+  body.video-shorts-route.has-sidebar-page
+    .video-shorts-feed__viewport:has(.video-shorts-comments-panel) {
+    width: min(calc(100% - 4rem), 920px);
+  }
+
+  body.video-shorts-route.has-sidebar-page
+    .video-shorts-feed__viewport[data-comments-open="true"] {
+    --video-shorts-stage-width: min(360px, 42dvh);
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 360px);
+    column-gap: 1rem;
+  }
+
+  body.video-shorts-route.has-sidebar-page
+    .video-shorts-feed__viewport[data-comments-open="true"]
+    .video-shorts-comments-panel {
+    width: min(38dvw, 360px);
+    min-width: 320px;
+    max-width: 360px;
+  }
+
+  body.video-shorts-route .experimental-screen__bottom-bar {
+    display: none !important;
+  }
+
+  body.video-shorts-route .video-shorts-item {
+    grid-template-columns: var(--video-shorts-stage-width) 60px;
+    grid-template-rows: auto;
+    gap: 0.875rem;
+    align-items: end;
+    width: auto;
+    background: var(--secondary);
+  }
+
+  body.video-shorts-route .video-shorts-item__player {
+    grid-row: 1;
+    grid-column: 1 / -1;
+    grid-template-columns: var(--video-shorts-stage-width) 60px;
+    gap: 0.875rem;
+    align-items: end;
+    width: auto;
+    transition: transform 240ms cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  body.video-shorts-route .video-shorts-item__stage {
+    max-height: calc(100dvh - var(--header-offset, 4em) - 7rem);
+    box-shadow: 0 14px 44px rgb(0 0 0 / 0.34);
+  }
+
+  body.video-shorts-route .video-shorts-item__info {
+    grid-row: 1;
+    grid-column: 1;
+    align-self: end;
+    justify-self: stretch;
+    z-index: 3;
+    max-width: none;
+    margin: 0 1rem 1rem;
+    color: var(--secondary);
+    text-shadow: 0 1px 2px rgb(0 0 0 / 0.8);
+    pointer-events: none;
+  }
+
+  body.video-shorts-route .video-shorts-metadata,
+  body.video-shorts-route .video-shorts-metadata__publisher,
+  body.video-shorts-route .video-shorts-metadata__publisher-link,
+  body.video-shorts-route .video-shorts-metadata__excerpt {
+    color: var(--secondary);
+  }
+
+  body.video-shorts-route .video-shorts-metadata__publisher-link {
+    pointer-events: auto;
+  }
+
+  body.video-shorts-route .video-shorts-metadata__excerpt {
+    -webkit-line-clamp: 3;
+  }
+
+  body.video-shorts-route .video-shorts-metadata__excerpt--expanded {
+    max-height: none;
+    overflow: visible;
+    -webkit-line-clamp: unset;
+  }
+
+  body.video-shorts-route .video-shorts-comments-panel {
+    transition:
+      opacity 240ms cubic-bezier(0.2, 0, 0, 1),
+      transform 240ms cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  body.video-shorts-route
+    .video-shorts-feed__viewport[data-comments-open="true"]
+    .video-shorts-item__player {
+    animation: video-shorts-player-settle 420ms cubic-bezier(0.2, 0, 0, 1) both;
+    will-change: transform;
+  }
+
+  body.video-shorts-route
+    .video-shorts-feed__viewport[data-comments-open="true"]
+    .video-shorts-comments-panel {
+    animation: video-shorts-comments-panel-enter 320ms
+      cubic-bezier(0.2, 0, 0, 1) both;
+    will-change: transform, opacity;
+  }
+}
+
+@keyframes video-shorts-player-settle {
+  from {
+    transform: translateX(clamp(72px, 9vw, 150px));
+  }
+
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes video-shorts-comments-panel-enter {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .video-shorts-feed__viewport,
+  .video-shorts-feed__viewport[data-comments-open="true"]
+    .video-shorts-item__player,
+  .video-shorts-feed__viewport[data-comments-open="true"]
+    .video-shorts-comments-panel {
+    animation: none;
+    transition: none;
+  }
+}

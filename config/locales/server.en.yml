@@ -1,0 +1,9 @@
+en:
+  site_settings:
+    video_shorts_enabled: "Enable the video shorts feed."
+    video_shorts_source_category_ids: "Category IDs eligible for the video shorts feed."
+    video_shorts_source_tag_names: "Tag names eligible for the video shorts feed."
+    video_shorts_excerpt_character_limit: "Number of excerpt characters shown on each video before the expand button appears."
+    video_shorts_page_size: "Default page size for the video shorts feed."
+    video_shorts_candidate_scan_limit: "Maximum post candidates scanned per video feed request."
+    video_shorts_debug_mode: "Show staff-only debug information for the video shorts feed."
