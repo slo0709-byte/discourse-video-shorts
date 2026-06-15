@@ -22,6 +22,8 @@ RSpec.describe "Video shorts comments direct replies contract" do
     first_reply = direct_reply(parent, raw: "Visible direct reply")
     second_reply = direct_reply(parent, raw: "Second visible reply")
     hidden_reply = direct_reply(parent, raw: "Hidden reply")
+    PostActionCreator.like(Fabricate(:user), first_reply)
+    PostActionCreator.like(Fabricate(:user), first_reply)
     hidden_reply.update_columns(
       hidden: true,
       hidden_at: Time.zone.now,
@@ -44,6 +46,11 @@ RSpec.describe "Video shorts comments direct replies contract" do
       "post_number" => first_reply.post_number,
       "reply_count" => 0,
     )
+    like_summary =
+      replies
+        .first["actions_summary"]
+        .find { |action| action["id"] == PostActionType.types[:like] }
+    expect(like_summary["count"]).to eq(2)
     expect(replies.first).to include("created_at", "avatar_template")
   end
 

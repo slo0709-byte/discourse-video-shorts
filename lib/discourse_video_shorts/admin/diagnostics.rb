@@ -25,6 +25,7 @@ module DiscourseVideoShorts
         {
           enabled: SiteSetting.video_shorts_enabled,
           settings_summary: settings_summary(source),
+          delivery: delivery_summary,
           sources: sources_summary(source),
           feed: feed_summary(feed, items),
           providers: { counts: counts_for(items, %i[media provider], buckets: PROVIDER_BUCKETS) },
@@ -64,6 +65,24 @@ module DiscourseVideoShorts
           configured_page_size: SiteSetting.video_shorts_page_size,
           configured_candidate_scan_limit: SiteSetting.video_shorts_candidate_scan_limit,
           debug_mode: SiteSetting.video_shorts_debug_mode,
+        }
+      end
+
+      def delivery_summary
+        {
+          native_uploads: {
+            object_storage_enabled: SiteSetting.enable_s3_uploads,
+            s3_cdn_url: SiteSetting.Upload.s3_cdn_url.presence,
+            s3_cdn_for_all_uploads: SiteSetting.s3_use_cdn_url_for_all_uploads,
+            site_cdn_url: GlobalSetting.cdn_url.presence,
+            recommendation:
+              "Use Discourse object storage plus a CDN for uploaded video files before high traffic.",
+          },
+          hls: {
+            requires_https: true,
+            recommendation:
+              "Host m3u8 playlists and segments on an HTTPS CDN; the feed passes external HLS URLs through to the browser player.",
+          },
         }
       end
 

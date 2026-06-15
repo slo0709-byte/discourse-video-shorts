@@ -2,6 +2,11 @@ import { ajax } from "discourse/lib/ajax";
 
 export const VIDEO_SHORTS_COMMENTS_PAGE_SIZE = 20;
 const FLAG_POST_ACTION_IDS = new Set([3, 4, 7, 8, 10]);
+const LIKE_POST_ACTION_ID = 2;
+
+function actionsSummary(post) {
+  return Array.isArray(post?.actions_summary) ? post.actions_summary : [];
+}
 
 function replyToUsername(post) {
   return (
@@ -17,13 +22,21 @@ export function canFlagPost(post) {
     return true;
   }
 
-  const actionsSummary = Array.isArray(post.actions_summary)
-    ? post.actions_summary
-    : [];
-
-  return actionsSummary.some((action) => {
+  return actionsSummary(post).some((action) => {
     return FLAG_POST_ACTION_IDS.has(action.id) && action.can_act;
   });
+}
+
+export function commentLikeCount(post) {
+  if (Number.isFinite(post?.like_count)) {
+    return post.like_count;
+  }
+
+  const likeAction = actionsSummary(post).find((action) => {
+    return action.id === LIKE_POST_ACTION_ID;
+  });
+
+  return Number(likeAction?.count || 0);
 }
 
 export function normalizeComment(post) {
@@ -42,6 +55,7 @@ export function normalizeComment(post) {
     post_type: post.post_type,
     post_url: post.post_url,
     reply_count: post.reply_count || 0,
+    like_count: commentLikeCount(post),
     raw: post.raw || "",
     can_edit: Boolean(post.can_edit),
     can_delete: Boolean(post.can_delete),
@@ -81,4 +95,22 @@ export async function fetchVideoShortsComments({ postId, after = null }) {
   const response = await ajax(`/posts/${postId}/replies.json`, { data });
 
   return normalizeDirectReplies(response);
+}
+
+export async function fetchVideoShortsTopicReplies({
+  topicUrl,
+  replyToPostNumber,
+}) {
+  if (!topicUrl || !replyToPostNumber) {
+    return [];
+  }
+
+  const response = await ajax(`${topicUrl}.json`);
+  const posts = response?.post_stream?.posts || [];
+
+  return posts
+    .filter((post) => {
+      return Number(post.reply_to_post_number || 0) === Number(replyToPostNumber);
+    })
+    .map((post) => normalizeComment(post));
 }

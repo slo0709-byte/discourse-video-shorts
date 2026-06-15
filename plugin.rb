@@ -48,6 +48,7 @@ after_initialize do
   require_relative "lib/discourse_video_shorts/admin/diagnostics"
   require_relative "lib/discourse_video_shorts/feed"
   require_relative "lib/discourse_video_shorts/media_extractor"
+  require_relative "lib/discourse_video_shorts/media_extractor_cache"
   require_relative "lib/discourse_video_shorts/source_selection"
   require_relative "app/controllers/discourse_video_shorts/admin/diagnostics_controller"
   require_relative "app/controllers/discourse_video_shorts/videos_controller"
@@ -71,5 +72,9 @@ after_initialize do
     end
 
     mount ::DiscourseVideoShorts::Engine, at: "/"
+  end
+
+  on(:post_edited) do |post|
+    ::DiscourseVideoShorts::MediaExtractorCache.invalidate(post)
   end
 end

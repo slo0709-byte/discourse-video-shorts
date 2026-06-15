@@ -5,9 +5,11 @@ import { action } from "@ember/object";
 import { service } from "@ember/service";
 import { modifier } from "ember-modifier";
 import { eq } from "discourse/truth-helpers";
+import dIcon from "discourse/ui-kit/helpers/d-icon";
 import { i18n } from "discourse-i18n";
 import VideoShortsCommentsSheet from "discourse/plugins/discourse-video-shorts/discourse/components/modal/video-shorts-comments-sheet";
 import VideoShortsCommentsSurface from "discourse/plugins/discourse-video-shorts/discourse/components/video-shorts/comments-surface";
+import { videoShortsAccentStyle } from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-visual-accent";
 import VideoShortsItem from "./item";
 
 export default class VideoShortsFeed extends Component {
@@ -202,6 +204,10 @@ export default class VideoShortsFeed extends Component {
     });
   }
 
+  get commentsAccentStyle() {
+    return videoShortsAccentStyle(this.commentsSurfaceItem);
+  }
+
   focusIsInsideIgnoredSurface(target) {
     return Boolean(
       target?.closest(
@@ -254,6 +260,16 @@ export default class VideoShortsFeed extends Component {
 
   @action
   openComments({ item, opener, onReply }) {
+    const itemIndex = this.indexForPostId(item?.post_id);
+
+    if (
+      this.isDesktopLayout &&
+      item?.post_id &&
+      String(item.post_id) !== String(this.activeItem?.post_id)
+    ) {
+      this.setActiveIndex(itemIndex, { syncUrl: true });
+    }
+
     this.commentsOpen = true;
     this.selectedCommentsItem = item;
     this.commentsOpener = opener || null;
@@ -268,6 +284,9 @@ export default class VideoShortsFeed extends Component {
         opener,
         onReply,
         onReplyPublished: (result) => this.handleReplyPublished(item, result),
+        onCommentDeleted: (deletedPost) =>
+          this.handleCommentDeleted(item, deletedPost),
+        onCommentMutation: (mutation) => this.handleCommentMutation(item, mutation),
         onClose: this.closeComments,
       },
     });
@@ -275,41 +294,56 @@ export default class VideoShortsFeed extends Component {
 
   @action
   closeComments() {
-    const opener = this.commentsOpener;
-    const openerPostId = opener
-      ?.closest("[data-post-id]")
-      ?.getAttribute("data-post-id");
-    const shouldRestoreOpenerFocus =
-      opener?.isConnected &&
-      (!this.isDesktopLayout ||
-        openerPostId === String(this.activeItem?.post_id));
-
     this.commentsOpen = false;
     this.selectedCommentsItem = null;
     this.commentsOpener = null;
 
     requestAnimationFrame(() => {
-      if (shouldRestoreOpenerFocus) {
-        opener.focus({ preventScroll: true });
-      }
+      document
+        .querySelector(".video-shorts-feed__items")
+        ?.focus({ preventScroll: true });
     });
   }
 
   @action
   handleReplyPublished(item, createdPost) {
-    const postId = item?.post_id;
+    return this.handleCommentMutation(item, {
+      type: "create",
+      post: createdPost,
+      countDelta: 1,
+    });
+  }
 
-    if (!postId || !createdPost?.id) {
-      return;
+  @action
+  handleCommentDeleted(item, deletedPost) {
+    return this.handleCommentMutation(item, {
+      type: "delete",
+      post: deletedPost,
+      countDelta: -1,
+    });
+  }
+
+  @action
+  handleCommentMutation(item, mutation) {
+    const postId = item?.post_id || mutation?.sourcePostId;
+    const countDelta = mutation?.countDelta || 0;
+    const hasReplyCountValue = Number.isFinite(mutation?.replyCountValue);
+
+    if (!postId || (countDelta === 0 && !hasReplyCountValue)) {
+      return mutation;
     }
 
     const current = this.replyCountFor(item);
+    const nextCount = hasReplyCountValue
+      ? mutation.replyCountValue
+      : Math.max(current + countDelta, 0);
+
     this.replyCountOverrides = {
       ...this.replyCountOverrides,
-      [postId]: current + 1,
+      [postId]: nextCount,
     };
 
-    return createdPost;
+    return mutation;
   }
 
   @action
@@ -318,6 +352,16 @@ export default class VideoShortsFeed extends Component {
       submittedItem || this.commentsSurfaceItem,
       createdPost
     );
+  }
+
+  @action
+  handleActiveCommentDeleted(deletedPost) {
+    return this.handleCommentDeleted(this.commentsSurfaceItem, deletedPost);
+  }
+
+  @action
+  handleActiveCommentMutation(mutation) {
+    return this.handleCommentMutation(this.commentsSurfaceItem, mutation);
   }
 
   togglePlayback() {
@@ -411,6 +455,7 @@ export default class VideoShortsFeed extends Component {
       {{#if this.showDesktopCommentsPanel}}
         <aside
           class="video-shorts-comments-panel"
+          style={{this.commentsAccentStyle}}
           data-comments-post-id={{this.commentsSurfaceItem.post_id}}
           aria-label={{this.commentsPanelLabel}}
         >
@@ -430,14 +475,17 @@ export default class VideoShortsFeed extends Component {
               aria-label={{i18n "video_shorts.comments.close"}}
               {{on "click" this.closeComments}}
             >
-              x
+              {{dIcon "xmark"}}
             </button>
           </div>
 
           <div class="video-shorts-comments-panel__body" tabindex="0">
             <VideoShortsCommentsSurface
               @item={{this.commentsSurfaceItem}}
+              @replyCount={{this.replyCountFor this.commentsSurfaceItem}}
               @onReplyPublished={{this.handleActiveReplyPublished}}
+              @onCommentDeleted={{this.handleActiveCommentDeleted}}
+              @onCommentMutation={{this.handleActiveCommentMutation}}
             />
           </div>
 

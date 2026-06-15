@@ -77,7 +77,7 @@ module DiscourseVideoShorts
         scanned_count += 1
 
         if guardian.can_see?(post.topic) && guardian.can_see?(post)
-          media = MediaExtractor.extract_media_for_visible_post(post, guardian)
+          media = MediaExtractorCache.extract_media_for_visible_post(post, guardian)
           if media.present? && !dedupe_keys.include?(media[:dedupe_key])
             dedupe_keys << media[:dedupe_key]
             extracted << [post, media]
@@ -111,7 +111,13 @@ module DiscourseVideoShorts
 
       extracted.map do |post, media|
         native_action_summary = native_action_summary(post)
-        serialize_item(post, media, liked_post_ids:, bookmarks_by_post_id:, native_action_summary:)
+        serialize_item(
+          post,
+          media,
+          liked_post_ids: liked_post_ids,
+          bookmarks_by_post_id: bookmarks_by_post_id,
+          native_action_summary: native_action_summary,
+        )
       end
     end
 
@@ -128,12 +134,19 @@ module DiscourseVideoShorts
         username: post.user&.username,
         avatar_template: post.user&.avatar_template,
         created_at: post.created_at.iso8601(3),
+        visual_accent_color: visual_accent_color(topic),
         counts: {
           like_count: post.like_count,
-          reply_count: post.reply_count,
+          reply_count: visible_reply_count(post),
           bookmark_count: post.bookmark_count,
         },
-        actions: action_state(post, liked_post_ids:, bookmarks_by_post_id:, native_action_summary:),
+        actions:
+          action_state(
+            post,
+            liked_post_ids: liked_post_ids,
+            bookmarks_by_post_id: bookmarks_by_post_id,
+            native_action_summary: native_action_summary,
+          ),
         native_action_summary: native_action_summary,
         media: serialize_media(media, post),
       }
@@ -141,6 +154,46 @@ module DiscourseVideoShorts
 
     def native_action_summary(post)
       PostSerializer.new(post, scope: guardian, root: false).actions_summary
+    end
+
+    def visible_reply_count(post)
+      visible_replies =
+        if post.post_number == 1
+          Post.where(topic_id: post.topic_id).where.not(post_number: post.post_number)
+        else
+          Post.where(id: descendant_reply_ids(post))
+        end
+
+      visible_replies
+        .secured(guardian)
+        .where(post_type: Post.types[:regular], deleted_at: nil, hidden: false)
+        .count
+    end
+
+    def descendant_reply_ids(post)
+      seen_reply_ids = Set.new
+      frontier_post_ids = [post.id]
+
+      while frontier_post_ids.present?
+        reply_ids = PostReply.where(post_id: frontier_post_ids).pluck(:reply_post_id)
+        reply_ids -= seen_reply_ids.to_a
+        break if reply_ids.blank?
+
+        seen_reply_ids.merge(reply_ids)
+        frontier_post_ids = reply_ids
+      end
+
+      seen_reply_ids.to_a
+    end
+
+    def visual_accent_color(topic)
+      color = topic&.category&.color
+      return nil if color.blank?
+
+      normalized = color.to_s.delete_prefix("#")
+      return nil if normalized !~ /\A[0-9a-f]{6}\z/i
+
+      "##{normalized.upcase}"
     end
 
     def serialize_media(media, post)

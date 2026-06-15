@@ -5,5 +5,5 @@ zh_CN:
     video_shorts_source_tag_names: "可进入视频短片信息流的标签名称。"
     video_shorts_excerpt_character_limit: "每个视频摘要在显示展开按钮前展示的字数。"
     video_shorts_page_size: "视频短片信息流的默认分页数量。"
-    video_shorts_candidate_scan_limit: "每次视频信息流请求最多扫描的帖子候选数量。"
+    video_shorts_candidate_scan_limit: "每次视频信息流请求最多扫描的帖子候选数量。请保持合理上限；上传视频尽量使用对象存储和 CDN，m3u8 播放列表与分片也尽量使用 HTTPS CDN 地址。"
     video_shorts_debug_mode: "为工作人员显示视频短片信息流的调试信息。"

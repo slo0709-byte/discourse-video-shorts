@@ -27,6 +27,27 @@ RSpec.describe "Discourse video shorts feed" do
     Fabricate(:post, topic: topic, raw: raw, cooked: raw, created_at: created_at)
   end
 
+  def direct_reply(parent, raw:)
+    reply =
+      Fabricate(
+        :post,
+        topic: parent.topic,
+        raw: raw,
+        cooked: "<p>#{raw}</p>",
+        reply_to_post_number: parent.post_number,
+      )
+    PostReply.create!(post: parent, reply: reply)
+    reply
+  end
+
+  def hide_post(post)
+    post.update_columns(
+      hidden: true,
+      hidden_at: Time.zone.now,
+      hidden_reason_id: Post.hidden_reasons[:flag_threshold_reached],
+    )
+  end
+
   it "returns a public native upload feed item with authorized URL fields" do
     category = Fabricate(:category)
     post = make_video_post(category: category)
@@ -45,6 +66,17 @@ RSpec.describe "Discourse video shorts feed" do
     expect(item["media"]["video_url"]).to be_present
   end
 
+  it "serializes a category-backed visual accent color for comments chrome" do
+    category = Fabricate(:category, color: "0F766E")
+    make_video_post(category: category)
+    SiteSetting.video_shorts_source_category_ids = category.id.to_s
+
+    get "/videos.json"
+
+    item = response.parsed_body["items"].first
+    expect(item["visual_accent_color"]).to eq("#0F766E")
+  end
+
   it "serializes native post action summary fields for frontend action wiring" do
     category = Fabricate(:category)
     make_video_post(category: category)
@@ -58,6 +90,83 @@ RSpec.describe "Discourse video shorts feed" do
     expect(item["native_action_summary"]).to include(
       include("id" => PostActionType.types[:like], "can_act" => true),
     )
+  end
+
+  it "serializes OP video replies as visible topic comments" do
+    category = Fabricate(:category)
+    video_post = create_post(category: category, raw: "Native video with discussion")
+    upload = Fabricate(:video_upload, extension: "mp4", original_filename: "clip.mp4")
+    Fabricate(:upload_reference, target: video_post, upload: upload)
+    first_direct_reply = direct_reply(video_post, raw: "First direct reply with enough detail")
+    direct_reply(video_post, raw: "Second direct reply with enough detail")
+    nested_reply = direct_reply(first_direct_reply, raw: "Nested reply with enough detail")
+    direct_reply(nested_reply, raw: "Floor reply with enough detail")
+    SiteSetting.video_shorts_source_category_ids = category.id.to_s
+
+    direct_reply_count = video_post.reload.reply_count
+    visible_topic_comment_count = video_post.topic.reload.posts_count - 1
+
+    get "/videos.json"
+
+    item = response.parsed_body["items"].find { |feed_item| feed_item["post_id"] == video_post.id }
+    expect(response.status).to eq(200)
+    expect(item).to be_present
+    expect(direct_reply_count).to eq(2)
+    expect(direct_reply_count).to be < visible_topic_comment_count
+    expect(item["counts"]["reply_count"]).to eq(visible_topic_comment_count)
+  end
+
+  it "excludes hidden OP video comments from the feed reply count" do
+    category = Fabricate(:category)
+    video_post = create_post(category: category, raw: "Native video with hidden discussion")
+    upload = Fabricate(:video_upload, extension: "mp4", original_filename: "clip.mp4")
+    Fabricate(:upload_reference, target: video_post, upload: upload)
+    first_visible_reply = direct_reply(video_post, raw: "Visible direct reply with enough detail")
+    hidden_direct_reply = direct_reply(video_post, raw: "Hidden direct reply with enough detail")
+    hidden_nested_reply = direct_reply(first_visible_reply, raw: "Hidden nested reply with enough detail")
+    visible_nested_reply = direct_reply(first_visible_reply, raw: "Visible nested reply with enough detail")
+    hide_post(hidden_direct_reply)
+    hide_post(hidden_nested_reply)
+    SiteSetting.video_shorts_source_category_ids = category.id.to_s
+
+    get "/videos.json"
+
+    item = response.parsed_body["items"].find { |feed_item| feed_item["post_id"] == video_post.id }
+    expect(response.status).to eq(200)
+    expect(item).to be_present
+    expect(video_post.topic.reload.posts_count).to be > 3
+    expect(item["counts"]["reply_count"]).to eq(2)
+    expect(item["counts"]["reply_count"]).to eq([first_visible_reply, visible_nested_reply].count)
+  end
+
+  it "serializes non-OP video replies as visible descendant comments" do
+    category = Fabricate(:category)
+    topic_post = create_post(category: category, raw: "Topic root before a video reply")
+    video_post = direct_reply(topic_post, raw: "Native video reply with discussion")
+    upload = Fabricate(:video_upload, extension: "mp4", original_filename: "clip.mp4")
+    Fabricate(:upload_reference, target: video_post, upload: upload)
+    first_direct_reply = direct_reply(video_post, raw: "First direct reply to the video reply")
+    second_direct_reply = direct_reply(video_post, raw: "Second direct reply to the video reply")
+    nested_reply = direct_reply(first_direct_reply, raw: "Nested reply to the first direct reply")
+    floor_reply = direct_reply(nested_reply, raw: "Floor reply to the nested reply")
+    SiteSetting.video_shorts_source_category_ids = category.id.to_s
+
+    direct_reply_count = video_post.reload.reply_count
+    visible_descendant_count = [
+      first_direct_reply,
+      second_direct_reply,
+      nested_reply,
+      floor_reply,
+    ].count
+
+    get "/videos.json"
+
+    item = response.parsed_body["items"].find { |feed_item| feed_item["post_id"] == video_post.id }
+    expect(response.status).to eq(200)
+    expect(item).to be_present
+    expect(direct_reply_count).to eq(2)
+    expect(direct_reply_count).to be < visible_descendant_count
+    expect(item["counts"]["reply_count"]).to eq(visible_descendant_count)
   end
 
   it "excludes private category videos for anonymous users" do
@@ -261,5 +370,38 @@ RSpec.describe "Discourse video shorts feed" do
     per_bookmark_queries = queries.grep(/FROM "bookmarks".*"bookmarkable_id" = \d/m)
     expect(per_post_action_queries).to be_empty
     expect(per_bookmark_queries).to be_empty
+  end
+
+  it "reuses cached media extraction descriptors across feed requests" do
+    category = Fabricate(:category)
+    post = make_video_post(category: category)
+    upload = post.uploads.first
+    SiteSetting.video_shorts_source_category_ids = category.id.to_s
+
+    DiscourseVideoShorts::MediaExtractor
+      .expects(:extract_media_for_visible_post)
+      .once
+      .returns(
+        provider: "native",
+        renderability: "native",
+        dedupe_key: "native:upload:#{upload.id}",
+        upload: {
+          id: upload.id,
+          sha1: upload.sha1,
+          extension: upload.extension,
+          original_filename: upload.original_filename,
+          filesize: upload.filesize,
+          secure: upload.secure?,
+        },
+      )
+
+    2.times do
+      get "/videos.json"
+      expect(response.status).to eq(200)
+      expect(response.parsed_body["items"].first["media"]).to include(
+        "provider" => "native",
+        "dedupe_key" => "native:upload:#{upload.id}",
+      )
+    end
   end
 end

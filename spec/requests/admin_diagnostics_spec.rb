@@ -198,6 +198,27 @@ RSpec.describe "Discourse video shorts admin diagnostics" do
     expect(response.parsed_body.dig("feed", "scan_limit")).to eq(100)
   end
 
+  it "reports upload and HLS delivery guidance for CDN-backed video traffic" do
+    sign_in(admin)
+
+    get "/admin/plugins/discourse-video-shorts/diagnostics.json"
+
+    expect(response.status).to eq(200)
+    expect(response.parsed_body["delivery"]).to include(
+      "native_uploads" =>
+        include(
+          "object_storage_enabled" => SiteSetting.enable_s3_uploads,
+          "s3_cdn_url" => SiteSetting.Upload.s3_cdn_url.presence,
+          "site_cdn_url" => GlobalSetting.cdn_url.presence,
+        ),
+      "hls" =>
+        include(
+          "requires_https" => true,
+          "recommendation" => include("CDN"),
+        ),
+    )
+  end
+
   it "does not expose raw iframe markup, signed cursors, or token-like provider query params" do
     category = Fabricate(:category)
     unsafe_provider_url = "https://www.youtube.com/embed/dQw4w9WgXcQ?token=secret"

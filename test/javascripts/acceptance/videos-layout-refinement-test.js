@@ -1,8 +1,13 @@
-import { click, currentURL, triggerKeyEvent, visit } from "@ember/test-helpers";
+import {
+  click,
+  currentURL,
+  triggerKeyEvent,
+  visit,
+} from "@ember/test-helpers";
 import { test } from "qunit";
 import { acceptance } from "discourse/tests/helpers/qunit-helpers";
 
-function feedItem(id, title) {
+function feedItem(id, title, attrs = {}) {
   return {
     topic_id: id,
     post_id: id,
@@ -42,6 +47,26 @@ function feedItem(id, title) {
       video_url: `/uploads/default/original/1X/video-${id}.mp4`,
       upload_id: id,
     },
+    ...attrs,
+  };
+}
+
+function directReply(id, username, cooked, attrs = {}) {
+  return {
+    id,
+    post_id: id,
+    post_number: attrs.post_number || 2,
+    user_id: attrs.user_id || id,
+    username,
+    avatar_template: `/user_avatar/localhost/${username}/{size}/1_2.png`,
+    cooked,
+    raw: cooked.replace(/<[^>]*>/g, ""),
+    created_at: "2026-06-08T12:00:00.000Z",
+    reply_count: 0,
+    can_edit: false,
+    can_delete: false,
+    can_flag: false,
+    ...attrs,
   };
 }
 
@@ -58,6 +83,51 @@ function computedThemeColor(variableName) {
 
 function isIdentityTransform(transform) {
   return transform === "none" || transform === "matrix(1, 0, 0, 1, 0, 0)";
+}
+
+function appendDesktopSidebarFixture() {
+  const sidebar = document.createElement("aside");
+  sidebar.className = "sidebar-wrapper video-shorts-test-sidebar";
+  sidebar.setAttribute("aria-label", "Primary navigation");
+  sidebar.style.cssText = [
+    "position: fixed",
+    "inset: var(--header-offset, 4em) auto 0 0",
+    "display: block",
+    "width: 248px",
+    "visibility: visible",
+    "background: var(--secondary)",
+  ].join(";");
+
+  const navigation = document.createElement("nav");
+  navigation.className = "sidebar-container";
+  navigation.textContent = "Videos navigation";
+  sidebar.append(navigation);
+
+  document.body.append(sidebar);
+
+  return sidebar;
+}
+
+function cssPixelValue(value) {
+  const parsedValue = Number.parseFloat(value);
+
+  return Number.isFinite(parsedValue) ? parsedValue : 0;
+}
+
+function isTransparentColor(color) {
+  return (
+    !color ||
+    color === "transparent" ||
+    color === "rgba(0, 0, 0, 0)" ||
+    /,\s*0\)$/.test(color)
+  );
+}
+
+function hasPaintedBackground(style) {
+  return (
+    style.backgroundImage !== "none" ||
+    !isTransparentColor(style.backgroundColor)
+  );
 }
 
 function mobileRuleTextsFor(selectorMatcher) {
@@ -122,13 +192,54 @@ acceptance("Video Shorts refined layout contract", function (needs) {
     const closedStageRect = document
       .querySelector(".video-shorts-item__stage")
       .getBoundingClientRect();
+    const closedStageAfterStyle = getComputedStyle(
+      document.querySelector(".video-shorts-item__stage"),
+      "::after",
+    );
+    const closedMetadata = document.querySelector(".video-shorts-metadata");
+    const closedMetadataRect = closedMetadata.getBoundingClientRect();
+    const closedMetadataStyle = getComputedStyle(closedMetadata);
     const closedInfoRect = document
       .querySelector(".video-shorts-item__info")
+      .getBoundingClientRect();
+    const closedViewportRect = document
+      .querySelector(".video-shorts-feed__viewport")
       .getBoundingClientRect();
 
     assert.true(
       closedInfoRect.bottom >= closedStageRect.top,
       "desktop closed metadata is bottom-aligned near the video stage",
+    );
+    assert.true(
+      closedStageRect.height <= closedViewportRect.height,
+      "desktop video stage fits inside the route viewport height",
+    );
+    assert.true(
+      Math.abs(closedStageRect.height / closedStageRect.width - 16 / 9) <= 0.02,
+      "desktop video stage preserves a 9:16 display ratio",
+    );
+    const closedStageScrimHeight = cssPixelValue(closedStageAfterStyle.height);
+    const hasBoundedStageScrim =
+      closedStageAfterStyle.content !== "none" &&
+      closedStageScrimHeight >= closedMetadataRect.height &&
+      closedStageScrimHeight <= closedStageRect.height * 0.45 &&
+      hasPaintedBackground(closedStageAfterStyle);
+    const hasMetadataBacking =
+      closedMetadataStyle.textShadow !== "none" ||
+      hasPaintedBackground(closedMetadataStyle);
+    const hasReadableMetadataBacking =
+      hasBoundedStageScrim || hasMetadataBacking;
+    const hasFullStageDarkVeil =
+      closedStageAfterStyle.content !== "none" &&
+      closedStageScrimHeight >= closedStageRect.height * 0.9;
+
+    assert.true(
+      hasReadableMetadataBacking,
+      "desktop metadata has a readable local backing over the video",
+    );
+    assert.false(
+      hasFullStageDarkVeil,
+      "desktop metadata readability does not depend on a full-stage dark veil",
     );
 
     await click('[data-action="open-comments"]');
@@ -150,11 +261,17 @@ acceptance("Video Shorts refined layout contract", function (needs) {
     const commentsPanelRect = document
       .querySelector(".video-shorts-comments-panel")
       .getBoundingClientRect();
+    const openViewportRect = document
+      .querySelector(".video-shorts-feed__viewport")
+      .getBoundingClientRect();
     const openStageRect = document
       .querySelector(".video-shorts-item__stage")
       .getBoundingClientRect();
     const openInfoRect = document
       .querySelector(".video-shorts-item__info")
+      .getBoundingClientRect();
+    const openRailRect = document
+      .querySelector(".video-shorts-action-rail")
       .getBoundingClientRect();
     const publisherLinkStyle = getComputedStyle(
       document.querySelector(".video-shorts-metadata__publisher-link"),
@@ -177,6 +294,18 @@ acceptance("Video Shorts refined layout contract", function (needs) {
       "desktop comments panel stays within the 450px shorts panel width",
     );
     assert.true(
+      commentsPanelRect.right <= window.innerWidth,
+      "desktop comments panel remains fully visible inside the viewport",
+    );
+    assert.true(
+      openRailRect.right <= commentsPanelRect.left,
+      "desktop action rail remains visible and separate from the comments panel",
+    );
+    assert.true(
+      openStageRect.height <= openViewportRect.height,
+      "desktop comments-open stage fits inside the route viewport height",
+    );
+    assert.true(
       openInfoRect.bottom <= openStageRect.bottom,
       "desktop comments-open metadata does not escape below the video stage",
     );
@@ -196,6 +325,95 @@ acceptance("Video Shorts refined layout contract", function (needs) {
     );
   });
 
+  test("desktop player keeps 9:16 bounds with comments open and closed", async function (assert) {
+    needs.pretender((server, helper) => {
+      server.get("/videos.json", () =>
+        helper.response({
+          items: [feedItem(302, "Desktop bounded player clip")],
+          next_cursor: null,
+          scan_limit_reached: false,
+        }),
+      );
+
+      server.get("/posts/302/replies.json", () =>
+        helper.response([
+          directReply(402, "reply-author", "<p>Layout reply</p>"),
+        ]),
+      );
+    });
+
+    await visit("/videos");
+
+    const assertLayout = (stateLabel, { metadataInsideStage = false } = {}) => {
+      const stageRect = document
+        .querySelector(".video-shorts-item__stage")
+        .getBoundingClientRect();
+      const viewportRect = document
+        .querySelector(".video-shorts-feed__viewport")
+        .getBoundingClientRect();
+      const railRect = document
+        .querySelector(".video-shorts-action-rail")
+        .getBoundingClientRect();
+      const infoRect = document
+        .querySelector(".video-shorts-item__info")
+        .getBoundingClientRect();
+      const aspectRatio = stageRect.width / stageRect.height;
+      const hasExpectedAspectRatio = aspectRatio >= 0.55 && aspectRatio <= 0.58;
+      const metadataInsideBounds = metadataInsideStage
+        ? infoRect.left >= stageRect.left && infoRect.right <= stageRect.right
+        : infoRect.right <= viewportRect.right;
+
+      assert.true(
+        hasExpectedAspectRatio,
+        `${stateLabel}: stage remains close to 9:16`,
+      );
+      assert.true(
+        stageRect.width >= 260,
+        `${stateLabel}: stage is not undersized on desktop`,
+      );
+      assert.true(
+        stageRect.left >= viewportRect.left,
+        `${stateLabel}: stage left edge stays inside viewport`,
+      );
+      assert.true(
+        stageRect.right <= viewportRect.right,
+        `${stateLabel}: stage right edge stays inside viewport`,
+      );
+      assert.true(
+        railRect.left >= stageRect.right,
+        `${stateLabel}: action rail stays outside the video stage`,
+      );
+      assert.true(
+        metadataInsideBounds,
+        `${stateLabel}: metadata stays inside its layout bounds`,
+      );
+      assert.true(
+        document.documentElement.scrollWidth <=
+          document.documentElement.clientWidth + 1,
+        `${stateLabel}: layout does not create horizontal overflow`,
+      );
+    };
+
+    assertLayout("comments closed");
+
+    await click('[data-action="open-comments"]');
+
+    assert.dom(".video-shorts-comments-panel").exists();
+    assertLayout("comments open", { metadataInsideStage: true });
+
+    const commentsPanelRect = document
+      .querySelector(".video-shorts-comments-panel")
+      .getBoundingClientRect();
+    const railRect = document
+      .querySelector(".video-shorts-action-rail")
+      .getBoundingClientRect();
+
+    assert.true(
+      railRect.right <= commentsPanelRect.left,
+      "comments-open rail does not overlap the comments panel",
+    );
+  });
+
   test("desktop sidebar route shell does not push the videos viewport offscreen", async function (assert) {
     needs.pretender((server, helper) => {
       server.get("/videos.json", () =>
@@ -207,11 +425,18 @@ acceptance("Video Shorts refined layout contract", function (needs) {
       );
     });
 
+    const sidebar = appendDesktopSidebarFixture();
     document.body.classList.add("has-sidebar-page");
 
     try {
       await visit("/videos");
 
+      assert
+        .dom(".video-shorts-left-nav")
+        .doesNotExist("video route does not render a custom YouTube-style left nav");
+
+      const sidebarStyle = getComputedStyle(sidebar);
+      const sidebarRect = sidebar.getBoundingClientRect();
       const viewportRect = document
         .querySelector(".video-shorts-feed__viewport")
         .getBoundingClientRect();
@@ -225,6 +450,20 @@ acceptance("Video Shorts refined layout contract", function (needs) {
       const actualLeftGap = viewportRect.left;
       const actualRightGap = window.innerWidth - viewportRect.right;
 
+      assert.notStrictEqual(
+        sidebarStyle.display,
+        "none",
+        "desktop video route keeps the left navigation sidebar rendered",
+      );
+      assert.notStrictEqual(
+        sidebarStyle.visibility,
+        "hidden",
+        "desktop video route keeps the left navigation sidebar visible",
+      );
+      assert.true(
+        sidebarRect.width >= 200,
+        "desktop video route preserves a usable left navigation width",
+      );
       assert.true(
         viewportRect.left >= 0,
         "sidebar page shell does not translate the videos viewport past the left edge",
@@ -243,6 +482,7 @@ acceptance("Video Shorts refined layout contract", function (needs) {
       );
     } finally {
       document.body.classList.remove("has-sidebar-page");
+      sidebar.remove();
     }
   });
 
@@ -433,6 +673,325 @@ acceptance("Video Shorts refined layout contract", function (needs) {
         "402",
         "active video remains the one the user scrolled to",
       );
+  });
+
+  test("closing comments restores feed controls and does not jump active video", async function (assert) {
+    needs.pretender((server, helper) => {
+      server.get("/videos.json", () =>
+        helper.response({
+          items: [
+            feedItem(601, "Close recovery first clip"),
+            feedItem(602, "Close recovery second clip"),
+            feedItem(603, "Close recovery third clip"),
+          ],
+          next_cursor: null,
+          scan_limit_reached: false,
+        }),
+      );
+
+      server.get("/posts/601/replies.json", () =>
+        helper.response([directReply(701, "first-author", "<p>First</p>")]),
+      );
+      server.get("/posts/602/replies.json", () =>
+        helper.response([directReply(702, "second-author", "<p>Second</p>")]),
+      );
+      server.get("/posts/603/replies.json", () =>
+        helper.response([directReply(703, "third-author", "<p>Third</p>")]),
+      );
+    });
+
+    await visit("/videos");
+    await click('[data-post-id="601"] [data-action="open-comments"]');
+
+    assert
+      .dom(".video-shorts-feed__viewport")
+      .hasAttribute("data-active-post-id", "601");
+    assert.dom(".video-shorts-comments-panel").exists();
+
+    document.querySelector(".video-shorts-comments-panel__body").focus();
+    await triggerKeyEvent(
+      ".video-shorts-comments-panel__body",
+      "keydown",
+      "ArrowDown",
+    );
+
+    assert
+      .dom(".video-shorts-feed__viewport")
+      .hasAttribute(
+        "data-active-post-id",
+        "601",
+        "feed shortcuts are ignored while focus is inside comments",
+      );
+
+    await click('[data-action="close-comments"]');
+
+    assert.dom(".video-shorts-comments-panel").doesNotExist();
+    assert
+      .dom(".video-shorts-feed__viewport")
+      .hasAttribute("data-comments-open", "false");
+    assert
+      .dom(".video-shorts-feed__viewport")
+      .hasAttribute(
+        "data-active-post-id",
+        "601",
+        "closing comments does not reset to another video",
+      );
+    assert.strictEqual(
+      document.activeElement,
+      document.querySelector(".video-shorts-feed__items"),
+      "feed item container receives focus after close",
+    );
+
+    await triggerKeyEvent(".video-shorts-feed__items", "keydown", "ArrowDown");
+
+    assert
+      .dom(".video-shorts-feed__viewport")
+      .hasAttribute(
+        "data-active-post-id",
+        "602",
+        "feed keyboard controls work after close",
+      );
+
+    await click('[data-post-id="602"] [data-action="share"]');
+
+    assert.dom(".d-modal").exists("share modal opens after comment close");
+  });
+
+  test("desktop opening comments from another visible item makes that item active", async function (assert) {
+    needs.pretender((server, helper) => {
+      server.get("/videos.json", () =>
+        helper.response({
+          items: [
+            feedItem(501, "Initially active clip"),
+            feedItem(502, "Clicked comments clip"),
+          ],
+          next_cursor: null,
+          scan_limit_reached: false,
+        }),
+      );
+
+      server.get("/posts/501/replies.json", () => helper.response([]));
+      server.get("/posts/502/replies.json", () => helper.response([]));
+    });
+
+    await visit("/videos");
+
+    assert
+      .dom(".video-shorts-feed__viewport")
+      .hasAttribute("data-active-post-id", "501");
+
+    await click('[data-post-id="502"] [data-action="open-comments"]');
+
+    assert
+      .dom(".video-shorts-feed__viewport")
+      .hasAttribute(
+        "data-active-post-id",
+        "502",
+        "clicked comments item becomes the active desktop item",
+      );
+    assert
+      .dom(".video-shorts-comments-panel")
+      .hasAttribute(
+        "data-comments-post-id",
+        "502",
+        "desktop panel opens for the clicked item instead of stale active state",
+      );
+  });
+
+  test("desktop deleting a comment updates panel and rail counts immediately", async function (assert) {
+    needs.pretender((server, helper) => {
+      server.get("/videos.json", () =>
+        helper.response({
+          items: [feedItem(503, "Desktop delete count clip")],
+          next_cursor: null,
+          scan_limit_reached: false,
+        }),
+      );
+
+      server.get("/posts/503/replies.json", () =>
+        helper.response([
+          directReply(603, "admin_user", "<p>Desktop comment to delete</p>", {
+            can_delete: true,
+            post_url: "/t/desktop-delete-count/503/2",
+          }),
+          directReply(604, "reply-author", "<p>Desktop comment to keep</p>", {
+            post_url: "/t/desktop-delete-count/503/3",
+          }),
+        ]),
+      );
+
+      server.delete("/posts/603.json", () => helper.response({}));
+    });
+
+    await visit("/videos");
+
+    assert
+      .dom('[data-post-id="503"] [data-action="open-comments"] .video-shorts-action-rail__count')
+      .hasText("2");
+
+    await click('[data-post-id="503"] [data-action="open-comments"]');
+
+    assert
+      .dom(".video-shorts-comments-panel__count")
+      .hasText("2 replies");
+
+    await click('[data-post-id="603"] [data-action="comment-tools-toggle"]');
+    await click('[data-post-id="603"] [data-action="delete-comment"]');
+    await click(".dialog-footer .btn-primary");
+
+    assert
+      .dom('.video-shorts-comments-surface__comment[data-post-id="603"]')
+      .doesNotExist("deleted comment is removed from the open panel");
+    assert
+      .dom(".video-shorts-comments-panel__count")
+      .hasText("1 reply");
+    assert
+      .dom('[data-post-id="503"] [data-action="open-comments"] .video-shorts-action-rail__count')
+      .hasText("1", "desktop rail count updates immediately after delete");
+  });
+
+  test("desktop deleting a parent with children keeps child context and decrements counts once", async function (assert) {
+    needs.pretender((server, helper) => {
+      server.get("/videos.json", () =>
+        helper.response({
+          items: [
+            feedItem(504, "Desktop parent delete count clip", {
+              counts: {
+                like_count: 0,
+                reply_count: 3,
+                bookmark_count: 0,
+              },
+            }),
+          ],
+          next_cursor: null,
+          scan_limit_reached: false,
+        }),
+      );
+
+      server.get("/posts/504/replies.json", () =>
+        helper.response([
+          directReply(605, "admin_user", "<p>Parent comment to delete</p>", {
+            can_delete: true,
+            post_url: "/t/desktop-parent-delete-count/504/2",
+            post_number: 2,
+            reply_count: 1,
+          }),
+          directReply(607, "second-author", "<p>Second top-level comment</p>", {
+            post_url: "/t/desktop-parent-delete-count/504/4",
+            post_number: 4,
+          }),
+        ]),
+      );
+      server.get("/posts/605/replies.json", () =>
+        helper.response([
+          directReply(606, "child-author", "<p>Child reply remains</p>", {
+            can_delete: true,
+            post_url: "/t/desktop-parent-delete-count/504/3",
+            post_number: 3,
+            reply_to_post_number: 2,
+            reply_to_username: "admin_user",
+          }),
+        ]),
+      );
+
+      server.delete("/posts/605.json", () => helper.response({}));
+    });
+
+    await visit("/videos");
+    await click('[data-post-id="504"] [data-action="open-comments"]');
+
+    assert.dom(".video-shorts-comments-panel__count").hasText("3 replies");
+    assert
+      .dom('[data-post-id="504"] [data-action="open-comments"] .video-shorts-action-rail__count')
+      .hasText("3");
+
+    await click('[data-post-id="605"] [data-action="comment-tools-toggle"]');
+    await click('[data-post-id="605"] [data-action="delete-comment"]');
+    await click(".dialog-footer .btn-primary");
+
+    assert
+      .dom('.video-shorts-comments-surface__comment[data-post-id="605"]')
+      .includesText("Deleted comment");
+    assert
+      .dom('.video-shorts-comments-surface__child-comment[data-post-id="606"]')
+      .includesText("Child reply remains");
+    assert.dom(".video-shorts-comments-panel__count").hasText("2 replies");
+    assert
+      .dom('[data-post-id="504"] [data-action="open-comments"] .video-shorts-action-rail__count')
+      .hasText("2", "parent deletion decrements global count exactly once");
+  });
+
+  test("desktop deleting a child reply updates parent, panel, and rail counts immediately", async function (assert) {
+    needs.pretender((server, helper) => {
+      server.get("/videos.json", () =>
+        helper.response({
+          items: [
+            feedItem(505, "Desktop child delete count clip", {
+              counts: {
+                like_count: 0,
+                reply_count: 3,
+                bookmark_count: 0,
+              },
+            }),
+          ],
+          next_cursor: null,
+          scan_limit_reached: false,
+        }),
+      );
+
+      server.get("/posts/505/replies.json", () =>
+        helper.response([
+          directReply(608, "parent-author", "<p>Desktop parent comment</p>", {
+            post_number: 2,
+            reply_count: 1,
+            post_url: "/t/desktop-child-delete-count/505/2",
+          }),
+          directReply(610, "second-author", "<p>Desktop second comment</p>", {
+            post_number: 4,
+            post_url: "/t/desktop-child-delete-count/505/4",
+          }),
+        ]),
+      );
+      server.get("/posts/608/replies.json", () =>
+        helper.response([
+          directReply(609, "admin_user", "<p>Desktop child reply to delete</p>", {
+            can_delete: true,
+            post_number: 3,
+            reply_to_post_number: 2,
+            reply_to_username: "parent-author",
+            post_url: "/t/desktop-child-delete-count/505/3",
+          }),
+        ]),
+      );
+
+      server.delete("/posts/609.json", () => helper.response({}));
+    });
+
+    await visit("/videos");
+    await click('[data-post-id="505"] [data-action="open-comments"]');
+
+    assert.dom(".video-shorts-comments-panel__count").hasText("3 replies");
+    assert
+      .dom('[data-post-id="505"] [data-action="open-comments"] .video-shorts-action-rail__count')
+      .hasText("3");
+    assert
+      .dom('.video-shorts-comments-surface__child-comment[data-post-id="609"]')
+      .includesText("Desktop child reply to delete");
+
+    await click('[data-post-id="609"] [data-action="comment-tools-toggle"]');
+    await click('[data-post-id="609"] [data-action="delete-comment"]');
+    await click(".dialog-footer .btn-primary");
+
+    assert
+      .dom('.video-shorts-comments-surface__child-comment[data-post-id="609"]')
+      .doesNotExist("deleted child reply is removed from the desktop panel");
+    assert
+      .dom('.video-shorts-comments-surface__comment[data-post-id="608"]')
+      .doesNotIncludeText("1 reply");
+    assert.dom(".video-shorts-comments-panel__count").hasText("2 replies");
+    assert
+      .dom('[data-post-id="505"] [data-action="open-comments"] .video-shorts-action-rail__count')
+      .hasText("2", "desktop rail count updates after child deletion");
   });
 
   test("desktop video viewport does not reserve a right gutter on sidebar pages", async function (assert) {
