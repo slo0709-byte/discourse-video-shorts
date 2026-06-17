@@ -37,21 +37,28 @@ RSpec.describe "Video shorts comments direct replies contract" do
     reply_ids = replies.map { |reply| reply["id"] }
 
     expect(replies).to be_an(Array)
-    expect(reply_ids).to eq([first_reply.id, second_reply.id])
-    expect(reply_ids).not_to include(hidden_reply.id)
+    expect(reply_ids).to eq([first_reply.id, second_reply.id, hidden_reply.id])
     expect(replies.first).to include(
       "id" => first_reply.id,
       "username" => first_reply.user.username,
       "cooked" => "<p>Visible direct reply</p>",
       "post_number" => first_reply.post_number,
+      "reply_to_post_number" => parent.post_number,
       "reply_count" => 0,
     )
     like_summary =
-      replies
-        .first["actions_summary"]
-        .find { |action| action["id"] == PostActionType.types[:like] }
+      replies.first["actions_summary"].find { |action| action["id"] == PostActionType.types[:like] }
     expect(like_summary["count"]).to eq(2)
     expect(replies.first).to include("created_at", "avatar_template")
+    hidden_reply_payload = replies.find { |reply| reply["id"] == hidden_reply.id }
+    expect(hidden_reply_payload).to include("hidden" => true)
+  end
+
+  it "returns a controlled response for malformed anonymous post ids" do
+    get "/posts/not-a-number/replies.json"
+
+    expect(response.status).to eq(404)
+    expect(response.parsed_body).to include("error_type" => "not_found")
   end
 
   it "defines adapter pagination expectations against the core array shape" do

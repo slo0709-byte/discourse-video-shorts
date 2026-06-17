@@ -11,36 +11,79 @@ export default class VideoShortsCommentsSheet extends Component {
   @tracked replyCountValue = null;
   closed = false;
 
-  followVisualKeyboard = modifier(() => {
-    const viewport = window.visualViewport;
+  lockMobileSheetViewport = modifier((element) => {
+    const sheet = element.closest(".video-shorts-comments-sheet");
+    const container = sheet?.querySelector(".d-modal__container");
 
-    const syncKeyboardOffset = () => {
-      const viewportBottom = viewport
-        ? viewport.offsetTop + viewport.height
-        : window.innerHeight;
-      const keyboardOffset = Math.max(
-        0,
-        Math.round(window.innerHeight - viewportBottom)
+    if (!sheet || !container) {
+      return;
+    }
+
+    let rafId = null;
+
+    const activeElementIsTextInput = () =>
+      document.activeElement?.matches?.(
+        "input, textarea, select, [contenteditable='true']"
       );
 
-      document.documentElement.style.setProperty(
-        "--video-shorts-keyboard-offset",
-        `${keyboardOffset}px`
+    const lockSheetRect = () => {
+      rafId = null;
+      const rect = container.getBoundingClientRect();
+
+      if (
+        !rect.width ||
+        !rect.height ||
+        rect.top >= window.innerHeight ||
+        rect.bottom > window.innerHeight + 2 ||
+        rect.bottom <= 0
+      ) {
+        rafId = requestAnimationFrame(lockSheetRect);
+        return;
+      }
+
+      sheet.style.setProperty(
+        "--video-shorts-comments-sheet-stable-top",
+        `${rect.top}px`
+      );
+      sheet.style.setProperty(
+        "--video-shorts-comments-sheet-stable-height",
+        `${rect.height}px`
+      );
+      sheet.style.setProperty(
+        "--video-shorts-comments-sheet-stable-bottom",
+        "auto"
       );
     };
 
-    syncKeyboardOffset();
-    viewport?.addEventListener("resize", syncKeyboardOffset);
-    viewport?.addEventListener("scroll", syncKeyboardOffset);
-    window.addEventListener("resize", syncKeyboardOffset);
+    const scheduleLockSheetRect = () => {
+      if (activeElementIsTextInput()) {
+        return;
+      }
+
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+      }
+
+      rafId = requestAnimationFrame(lockSheetRect);
+    };
+
+    scheduleLockSheetRect();
+    window.addEventListener("resize", scheduleLockSheetRect);
+    window.visualViewport?.addEventListener("resize", scheduleLockSheetRect);
 
     return () => {
-      viewport?.removeEventListener("resize", syncKeyboardOffset);
-      viewport?.removeEventListener("scroll", syncKeyboardOffset);
-      window.removeEventListener("resize", syncKeyboardOffset);
-      document.documentElement.style.removeProperty(
-        "--video-shorts-keyboard-offset"
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+      }
+
+      window.removeEventListener("resize", scheduleLockSheetRect);
+      window.visualViewport?.removeEventListener(
+        "resize",
+        scheduleLockSheetRect
       );
+      sheet.style.removeProperty("--video-shorts-comments-sheet-stable-top");
+      sheet.style.removeProperty("--video-shorts-comments-sheet-stable-height");
+      sheet.style.removeProperty("--video-shorts-comments-sheet-stable-bottom");
     };
   });
 
@@ -137,7 +180,7 @@ export default class VideoShortsCommentsSheet extends Component {
         <div
           class="video-shorts-comments-sheet__body"
           tabindex="0"
-          {{this.followVisualKeyboard}}
+          {{this.lockMobileSheetViewport}}
         >
           <VideoShortsCommentsSurface
             @item={{this.item}}

@@ -22,6 +22,21 @@ en:
         load_more: "Load more"
         loading_more: "Loading..."
         load_error: "Could not load comments"
+        view_replies:
+          one: "View more"
+          other: "View more"
+        view_replies_aria:
+          one: "View more replies to %{username}"
+          other: "View more replies to %{username}"
+        load_more_replies:
+          one: "View more"
+          other: "View more"
+        load_more_replies_aria:
+          one: "View more replies to %{username}"
+          other: "View more replies to %{username}"
+        loading_replies: "Loading replies..."
+        replies_error: "Could not load replies"
+        retry_replies: "Retry loading replies"
         empty: "No comments yet"
         count:
           one: "%{count} reply"
@@ -33,6 +48,7 @@ en:
         reply_target_missing: "Could not find the comment to reply to"
         publish_error: "Could not publish reply"
         reply: "Reply"
+        reply_to_user: "Reply to %{username}"
         edit: "Edit"
         tools: "Comment tools"
         copy_link: "Copy link"

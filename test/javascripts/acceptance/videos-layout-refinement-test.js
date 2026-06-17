@@ -1,9 +1,4 @@
-import {
-  click,
-  currentURL,
-  triggerKeyEvent,
-  visit,
-} from "@ember/test-helpers";
+import { click, currentURL, triggerKeyEvent, visit } from "@ember/test-helpers";
 import { test } from "qunit";
 import { acceptance } from "discourse/tests/helpers/qunit-helpers";
 
@@ -150,6 +145,39 @@ function mobileRuleTextsFor(selectorMatcher) {
   });
 }
 
+function desktopRuleTextsFor(selectorMatcher) {
+  return [...document.styleSheets].flatMap((sheet) => {
+    try {
+      return [...sheet.cssRules].flatMap((rule) => {
+        if (!rule.conditionText?.includes("width >= 1024px")) {
+          return [];
+        }
+
+        return [...rule.cssRules]
+          .filter((nestedRule) =>
+            selectorMatcher(nestedRule.selectorText || ""),
+          )
+          .map((nestedRule) => nestedRule.cssText);
+      });
+    } catch {
+      return [];
+    }
+  });
+}
+
+function ruleTextsFor(selectorMatcher) {
+  return [...document.styleSheets].flatMap((sheet) => {
+    try {
+      return [...sheet.cssRules]
+        .filter((rule) => !rule.conditionText)
+        .filter((rule) => selectorMatcher(rule.selectorText || ""))
+        .map((rule) => rule.cssText);
+    } catch {
+      return [];
+    }
+  });
+}
+
 acceptance("Video Shorts refined layout contract", function (needs) {
   needs.settings({ video_shorts_enabled: true });
   needs.user();
@@ -202,13 +230,39 @@ acceptance("Video Shorts refined layout contract", function (needs) {
     const closedInfoRect = document
       .querySelector(".video-shorts-item__info")
       .getBoundingClientRect();
+    const closedRailRect = document
+      .querySelector(".video-shorts-action-rail")
+      .getBoundingClientRect();
     const closedViewportRect = document
       .querySelector(".video-shorts-feed__viewport")
       .getBoundingClientRect();
+    const closedRailIsSized =
+      closedRailRect.width > 0 && closedRailRect.height > 0;
 
+    assert.true(
+      closedRailIsSized,
+      "desktop closed action rail is visibly sized",
+    );
+    assert.true(
+      closedRailRect.right <= window.innerWidth,
+      "desktop closed action rail remains inside the viewport",
+    );
+    assert.strictEqual(
+      getComputedStyle(
+        document.querySelector(
+          ".video-shorts-action-rail [data-action='open-comments']",
+        ),
+      ).color,
+      computedThemeColor("--primary"),
+      "desktop closed action rail stays readable on the Discourse page background",
+    );
     assert.true(
       closedInfoRect.bottom >= closedStageRect.top,
       "desktop closed metadata is bottom-aligned near the video stage",
+    );
+    assert.true(
+      closedStageRect.bottom - closedInfoRect.bottom <= 80,
+      "desktop closed metadata leaves only the playback area at the bottom",
     );
     assert.true(
       closedStageRect.height <= closedViewportRect.height,
@@ -301,6 +355,15 @@ acceptance("Video Shorts refined layout contract", function (needs) {
       openRailRect.right <= commentsPanelRect.left,
       "desktop action rail remains visible and separate from the comments panel",
     );
+    assert.strictEqual(
+      getComputedStyle(
+        document.querySelector(
+          ".video-shorts-action-rail [data-action='open-comments']",
+        ),
+      ).color,
+      computedThemeColor("--primary"),
+      "desktop action rail stays readable on the Discourse page background",
+    );
     assert.true(
       openStageRect.height <= openViewportRect.height,
       "desktop comments-open stage fits inside the route viewport height",
@@ -354,6 +417,7 @@ acceptance("Video Shorts refined layout contract", function (needs) {
       const railRect = document
         .querySelector(".video-shorts-action-rail")
         .getBoundingClientRect();
+      const railIsSized = railRect.width > 0 && railRect.height > 0;
       const infoRect = document
         .querySelector(".video-shorts-item__info")
         .getBoundingClientRect();
@@ -382,6 +446,18 @@ acceptance("Video Shorts refined layout contract", function (needs) {
       assert.true(
         railRect.left >= stageRect.right,
         `${stateLabel}: action rail stays outside the video stage`,
+      );
+      assert.true(
+        railIsSized,
+        `${stateLabel}: action rail remains visibly sized`,
+      );
+      assert.true(
+        railRect.right <= window.innerWidth,
+        `${stateLabel}: action rail remains inside the viewport`,
+      );
+      assert.true(
+        stageRect.bottom - infoRect.bottom <= 80,
+        `${stateLabel}: metadata reserves only the playback control area`,
       );
       assert.true(
         metadataInsideBounds,
@@ -433,7 +509,9 @@ acceptance("Video Shorts refined layout contract", function (needs) {
 
       assert
         .dom(".video-shorts-left-nav")
-        .doesNotExist("video route does not render a custom YouTube-style left nav");
+        .doesNotExist(
+          "video route does not render a custom YouTube-style left nav",
+        );
 
       const sidebarStyle = getComputedStyle(sidebar);
       const sidebarRect = sidebar.getBoundingClientRect();
@@ -550,6 +628,12 @@ acceptance("Video Shorts refined layout contract", function (needs) {
     const infoStyle = getComputedStyle(
       item.querySelector(".video-shorts-item__info"),
     );
+    const mobileInfoRules = mobileRuleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .includes(".video-shorts-item__info"),
+    );
     const rail = item.querySelector(".video-shorts-action-rail");
     const railStyle = getComputedStyle(rail);
     const railButton = rail.querySelector('[data-action="open-comments"]');
@@ -591,6 +675,17 @@ acceptance("Video Shorts refined layout contract", function (needs) {
       "metadata overlay does not block the mobile rail hit targets",
     );
     assert.true(
+      mobileInfoRules.some((cssText) =>
+        cssText.includes("--video-shorts-mobile-playbar-reserve"),
+      ),
+      "mobile metadata reserve is named as the bottom playback control area",
+    );
+    assert.deepEqual(
+      mobileInfoRules.filter((cssText) => cssText.includes("7.5rem")),
+      [],
+      "mobile metadata no longer reserves a large vertical gap above the playbar",
+    );
+    assert.true(
       railStyle.zIndex > infoStyle.zIndex,
       "mobile rail is layered above metadata",
     );
@@ -611,6 +706,12 @@ acceptance("Video Shorts refined layout contract", function (needs) {
       railButtonStyle.boxShadow,
       "none",
       "comments rail button does not draw a square/card shadow",
+    );
+    assert.false(
+      mobileRuleTextsFor((selector) =>
+        selector.includes("video-shorts-comments-surface__child-list"),
+      ).some((text) => text.includes("calc(-1")),
+      "mobile comments sheet does not use negative margins for nested replies",
     );
   });
 
@@ -826,14 +927,14 @@ acceptance("Video Shorts refined layout contract", function (needs) {
     await visit("/videos");
 
     assert
-      .dom('[data-post-id="503"] [data-action="open-comments"] .video-shorts-action-rail__count')
+      .dom(
+        '[data-post-id="503"] [data-action="open-comments"] .video-shorts-action-rail__count',
+      )
       .hasText("2");
 
     await click('[data-post-id="503"] [data-action="open-comments"]');
 
-    assert
-      .dom(".video-shorts-comments-panel__count")
-      .hasText("2 replies");
+    assert.dom(".video-shorts-comments-panel__count").hasText("2 replies");
 
     await click('[data-post-id="603"] [data-action="comment-tools-toggle"]');
     await click('[data-post-id="603"] [data-action="delete-comment"]');
@@ -842,11 +943,11 @@ acceptance("Video Shorts refined layout contract", function (needs) {
     assert
       .dom('.video-shorts-comments-surface__comment[data-post-id="603"]')
       .doesNotExist("deleted comment is removed from the open panel");
+    assert.dom(".video-shorts-comments-panel__count").hasText("1 reply");
     assert
-      .dom(".video-shorts-comments-panel__count")
-      .hasText("1 reply");
-    assert
-      .dom('[data-post-id="503"] [data-action="open-comments"] .video-shorts-action-rail__count')
+      .dom(
+        '[data-post-id="503"] [data-action="open-comments"] .video-shorts-action-rail__count',
+      )
       .hasText("1", "desktop rail count updates immediately after delete");
   });
 
@@ -902,7 +1003,9 @@ acceptance("Video Shorts refined layout contract", function (needs) {
 
     assert.dom(".video-shorts-comments-panel__count").hasText("3 replies");
     assert
-      .dom('[data-post-id="504"] [data-action="open-comments"] .video-shorts-action-rail__count')
+      .dom(
+        '[data-post-id="504"] [data-action="open-comments"] .video-shorts-action-rail__count',
+      )
       .hasText("3");
 
     await click('[data-post-id="605"] [data-action="comment-tools-toggle"]');
@@ -917,7 +1020,9 @@ acceptance("Video Shorts refined layout contract", function (needs) {
       .includesText("Child reply remains");
     assert.dom(".video-shorts-comments-panel__count").hasText("2 replies");
     assert
-      .dom('[data-post-id="504"] [data-action="open-comments"] .video-shorts-action-rail__count')
+      .dom(
+        '[data-post-id="504"] [data-action="open-comments"] .video-shorts-action-rail__count',
+      )
       .hasText("2", "parent deletion decrements global count exactly once");
   });
 
@@ -954,13 +1059,18 @@ acceptance("Video Shorts refined layout contract", function (needs) {
       );
       server.get("/posts/608/replies.json", () =>
         helper.response([
-          directReply(609, "admin_user", "<p>Desktop child reply to delete</p>", {
-            can_delete: true,
-            post_number: 3,
-            reply_to_post_number: 2,
-            reply_to_username: "parent-author",
-            post_url: "/t/desktop-child-delete-count/505/3",
-          }),
+          directReply(
+            609,
+            "admin_user",
+            "<p>Desktop child reply to delete</p>",
+            {
+              can_delete: true,
+              post_number: 3,
+              reply_to_post_number: 2,
+              reply_to_username: "parent-author",
+              post_url: "/t/desktop-child-delete-count/505/3",
+            },
+          ),
         ]),
       );
 
@@ -972,7 +1082,9 @@ acceptance("Video Shorts refined layout contract", function (needs) {
 
     assert.dom(".video-shorts-comments-panel__count").hasText("3 replies");
     assert
-      .dom('[data-post-id="505"] [data-action="open-comments"] .video-shorts-action-rail__count')
+      .dom(
+        '[data-post-id="505"] [data-action="open-comments"] .video-shorts-action-rail__count',
+      )
       .hasText("3");
     assert
       .dom('.video-shorts-comments-surface__child-comment[data-post-id="609"]')
@@ -990,7 +1102,9 @@ acceptance("Video Shorts refined layout contract", function (needs) {
       .doesNotIncludeText("1 reply");
     assert.dom(".video-shorts-comments-panel__count").hasText("2 replies");
     assert
-      .dom('[data-post-id="505"] [data-action="open-comments"] .video-shorts-action-rail__count')
+      .dom(
+        '[data-post-id="505"] [data-action="open-comments"] .video-shorts-action-rail__count',
+      )
       .hasText("2", "desktop rail count updates after child deletion");
   });
 
@@ -1048,6 +1162,45 @@ acceptance("Video Shorts refined layout contract", function (needs) {
     } finally {
       document.body.classList.remove("has-sidebar-page");
     }
+  });
+
+  test("desktop video route removes notification vertical offsets from the shorts stage", function (assert) {
+    const desktopMainOutletRules = desktopRuleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .includes("body.video-shorts-route #main-outlet"),
+    );
+    const desktopAlertRules = desktopRuleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .includes("body.video-shorts-route .alert-emails-disabled"),
+    );
+    const desktopFeedRules = desktopRuleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .includes("body.video-shorts-route .video-shorts-feed"),
+    );
+
+    assert.true(
+      desktopMainOutletRules.some((cssText) =>
+        cssText.includes("padding-top: 0"),
+      ),
+      "desktop shorts route removes Discourse main outlet top padding",
+    );
+    assert.true(
+      desktopAlertRules.some((cssText) => cssText.includes("display: none")),
+      "desktop shorts route hides email warning alert so it does not push the video down",
+    );
+    assert.deepEqual(
+      desktopFeedRules.filter((cssText) =>
+        cssText.includes("alert-emails-disabled"),
+      ),
+      [],
+      "desktop feed height no longer subtracts a stale email alert offset",
+    );
   });
 });
 
@@ -1187,6 +1340,89 @@ acceptance("Video Shorts refined mobile route shell", function (needs) {
     );
   });
 
+  test("mobile video route sizes the player shell with stable viewport height", function (assert) {
+    const routeBodyRules = mobileRuleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .includes("body.video-shorts-route"),
+    );
+    const routeMainRules = mobileRuleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .some((selector) =>
+          [
+            "body.video-shorts-route #main",
+            "body.video-shorts-route .discourse-root",
+            "body.video-shorts-route #main-outlet-wrapper",
+            "body.video-shorts-route #main-outlet",
+          ].includes(selector),
+        ),
+    );
+    const routeFeedRules = mobileRuleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .includes("body.video-shorts-route .video-shorts-feed"),
+    );
+    const mobileFeedRules = mobileRuleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .includes(".video-shorts-feed"),
+    );
+    const playerShellRules = [
+      ...routeBodyRules,
+      ...routeMainRules,
+      ...routeFeedRules,
+      ...mobileFeedRules,
+    ];
+
+    assert.true(
+      routeBodyRules.some(
+        (cssText) =>
+          cssText.includes("--video-shorts-mobile-route-height: 100svh") &&
+          cssText.includes("height: var(--video-shorts-mobile-route-height)"),
+      ),
+      "mobile video route defines a stable viewport height custom property",
+    );
+    assert.true(
+      routeMainRules.some((cssText) =>
+        cssText.includes("height: var(--video-shorts-mobile-route-height)"),
+      ),
+      "mobile Discourse route containers use the dynamic route height",
+    );
+    assert.true(
+      routeFeedRules.some(
+        (cssText) =>
+          cssText.includes(
+            "--video-shorts-feed-height: var(--video-shorts-mobile-route-height)",
+          ) &&
+          cssText.includes("height: var(--video-shorts-mobile-route-height)"),
+      ),
+      "mobile feed height follows the dynamic route height",
+    );
+    assert.true(
+      mobileFeedRules.some((cssText) =>
+        cssText.includes(
+          "--video-shorts-feed-height: var(--video-shorts-mobile-route-height, 100svh)",
+        ),
+      ),
+      "mobile feed fallback uses stable viewport height",
+    );
+    assert.deepEqual(
+      playerShellRules.filter((cssText) => cssText.includes("100lvh")),
+      [],
+      "mobile player shell rules do not hard-code largest viewport height",
+    );
+    assert.deepEqual(
+      playerShellRules.filter((cssText) => cssText.includes("100dvh")),
+      [],
+      "mobile player shell rules do not follow keyboard-shrinking dynamic viewport height",
+    );
+  });
+
   test("mobile video route paints the root background through reserved browser gutters", function (assert) {
     const htmlVideoShortsRouteBackgroundRules = [
       ...document.styleSheets,
@@ -1321,6 +1557,233 @@ acceptance("Video Shorts refined mobile route shell", function (needs) {
       fullPageFixedOverlays,
       [],
       "mobile route does not create html/body/feed fixed full-page overlays",
+    );
+  });
+
+  test("mobile comments sheet keeps one scroll surface and nested replies in flow", function (assert) {
+    const baseSheetBodyRules = ruleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .includes(".video-shorts-comments-sheet__body"),
+    );
+    const sheetShellRules = mobileRuleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .includes(".video-shorts-comments-sheet"),
+    );
+    const sheetContainerRules = mobileRuleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .includes(
+          "body.video-shorts-route .video-shorts-comments-sheet .d-modal__container",
+        ),
+    );
+    const sheetModalBodyRules = mobileRuleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .includes(
+          "body.video-shorts-route .video-shorts-comments-sheet .d-modal__body",
+        ),
+    );
+    const sheetBodyRules = mobileRuleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .includes(".video-shorts-comments-sheet__body"),
+    );
+    const sheetListRules = mobileRuleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .includes(
+          ".video-shorts-comments-sheet .video-shorts-comments-surface__list",
+        ),
+    );
+    const replyDialogRules = mobileRuleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .includes(
+          "body.video-shorts-route .video-shorts-comments-sheet .video-shorts-comments-surface__reply-dialog",
+        ),
+    );
+    const nestedSheetIndentRules = mobileRuleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .some((selector) =>
+          [
+            ".video-shorts-comments-sheet .video-shorts-comments-surface__child-comment .video-shorts-comments-surface__child-list",
+            ".video-shorts-comments-sheet .video-shorts-comments-surface__child-list--deep",
+          ].includes(selector),
+        ),
+    );
+    const childCommentRules = ruleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .some((selector) =>
+          [
+            ".video-shorts-comments-surface__child-comment",
+            ".video-shorts-comments-surface__child-comment--nested",
+            ".video-shorts-comments-surface__child-comment--deep",
+          ].includes(selector),
+        ),
+    ).filter((cssText) => cssText.includes("grid-template-columns"));
+    const childListRules = ruleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .includes(".video-shorts-comments-surface__child-list"),
+    );
+
+    assert.deepEqual(
+      sheetContainerRules.filter((cssText) =>
+        /(?:bottom|inset|height|max-height):[^;]*--video-shorts-keyboard-offset/.test(
+          cssText,
+        ),
+      ),
+      [],
+      "mobile sheet container position and height do not follow the visual viewport keyboard offset",
+    );
+    assert.deepEqual(
+      [...baseSheetBodyRules, ...sheetContainerRules, ...sheetBodyRules].filter(
+        (cssText) => /\bdvh\b/.test(cssText),
+      ),
+      [],
+      "mobile comments sheet sizing does not use dynamic viewport height units that shrink under the keyboard",
+    );
+    assert.deepEqual(
+      [...baseSheetBodyRules, ...sheetContainerRules, ...sheetBodyRules].filter(
+        (cssText) => /\blvh\b/.test(cssText),
+      ),
+      [],
+      "mobile comments sheet sizing does not use largest viewport height units that can exceed the visible phone viewport",
+    );
+    assert.true(
+      sheetContainerRules.some((cssText) =>
+        cssText.includes(
+          "inset: auto 0 var(--video-shorts-comments-sheet-stable-bottom, 0)",
+        ),
+      ),
+      "mobile sheet container can release the bottom edge after locking its open position",
+    );
+    assert.true(
+      sheetContainerRules.some((cssText) =>
+        cssText.includes(
+          "top: var(--video-shorts-comments-sheet-stable-top, auto)",
+        ),
+      ),
+      "mobile sheet container can lock its opening top edge against keyboard viewport shrink",
+    );
+    assert.true(
+      sheetContainerRules.some((cssText) =>
+        cssText.includes("--video-shorts-comments-sheet-stable-height"),
+      ),
+      "mobile sheet container can lock its opening height against keyboard viewport shrink",
+    );
+    assert.true(
+      sheetContainerRules.some((cssText) =>
+        cssText.includes("--video-shorts-comments-sheet-body-max-height"),
+      ),
+      "mobile sheet container bounds its height below the reserved header/logo area",
+    );
+    assert.true(
+      sheetShellRules.some((cssText) =>
+        cssText.includes("--video-shorts-mobile-route-height"),
+      ),
+      "mobile sheet fallback height follows the route height locked before keyboard focus",
+    );
+    assert.true(
+      sheetModalBodyRules.some((cssText) =>
+        cssText.includes("overflow: hidden"),
+      ),
+      "mobile modal body does not become a second scroll container",
+    );
+    assert.true(
+      sheetBodyRules.some((cssText) => cssText.includes("overflow: hidden")),
+      "mobile comments sheet body delegates scrolling to the comments list",
+    );
+    assert.true(
+      sheetListRules.some((cssText) => cssText.includes("overflow-y: auto")),
+      "mobile comments list is the single active scroll surface",
+    );
+    assert.true(
+      replyDialogRules.some((cssText) => cssText.includes("position: fixed")),
+      "mobile floor-reply composer dialog is centered against the screen instead of the lower sheet",
+    );
+    assert.deepEqual(
+      nestedSheetIndentRules,
+      [],
+      "mobile sheet no longer defines third-level reply indentation rules",
+    );
+    assert.true(
+      childCommentRules.length >= 1,
+      "second-level reply column rules are loaded",
+    );
+    assert.true(
+      childCommentRules.every((cssText) =>
+        cssText.includes("grid-template-columns: 1.75rem minmax(0, 1fr)"),
+      ),
+      "second-level reply avatar tracks use the fixed small avatar",
+    );
+    assert.true(
+      childListRules.some((cssText) => cssText.includes("gap: 0.35rem")),
+      "second-level reply list uses a fixed compact gap",
+    );
+    assert.true(
+      childListRules.some((cssText) =>
+        cssText.includes("align-content: start"),
+      ),
+      "second-level reply list does not distribute free vertical space between rows",
+    );
+  });
+
+  test("desktop comments panel routes wheel scrolling to the comments list", function (assert) {
+    const panelBodyRules = ruleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .includes(".video-shorts-comments-panel__body"),
+    );
+    const panelSurfaceRules = ruleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .includes(
+          ".video-shorts-comments-panel .video-shorts-comments-surface",
+        ),
+    );
+    const panelListRules = ruleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .includes(
+          ".video-shorts-comments-panel .video-shorts-comments-surface__list",
+        ),
+    );
+
+    assert.true(
+      panelBodyRules.some((cssText) => cssText.includes("overflow: hidden")),
+      "desktop comments panel body is not a competing wheel scroll container",
+    );
+    assert.true(
+      panelSurfaceRules.some((cssText) => cssText.includes("height: 100%")),
+      "desktop comments surface fills the panel body",
+    );
+    assert.true(
+      panelListRules.some((cssText) => cssText.includes("overflow-y: auto")),
+      "desktop comments list owns the scrollable wheel surface",
+    );
+    assert.true(
+      panelListRules.some((cssText) =>
+        cssText.includes("overscroll-behavior: contain"),
+      ),
+      "desktop comments list contains wheel chaining before it reaches the feed",
     );
   });
 

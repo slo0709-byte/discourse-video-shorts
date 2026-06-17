@@ -96,21 +96,3 @@ export async function fetchVideoShortsComments({ postId, after = null }) {
 
   return normalizeDirectReplies(response);
 }
-
-export async function fetchVideoShortsTopicReplies({
-  topicUrl,
-  replyToPostNumber,
-}) {
-  if (!topicUrl || !replyToPostNumber) {
-    return [];
-  }
-
-  const response = await ajax(`${topicUrl}.json`);
-  const posts = response?.post_stream?.posts || [];
-
-  return posts
-    .filter((post) => {
-      return Number(post.reply_to_post_number || 0) === Number(replyToPostNumber);
-    })
-    .map((post) => normalizeComment(post));
-}

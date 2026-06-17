@@ -6,7 +6,7 @@ Status: v1 vertical short-feed contract. The server emits only visible Discourse
 
 `/videos` keeps Discourse permissions, topic links, reply creation, and native post actions. On desktop, it uses a YouTube Shorts-style layout inside the normal shell: centered 9:16 snap-scrolled player, adjacent action rail, and an expandable right comments/context panel. On mobile, it is route-scoped fullscreen and hides Discourse chrome only while the viewer remains on `/videos`; the action rail overlays the player on the right and comments open in a bottom sheet. It is not a 16:9 list, not an exact YouTube clone, and does not add custom likes, comments, saves, shares, or reports.
 
-Comments are read without route navigation. V1 reads direct replies to the source video post from Discourse core `GET /posts/:post_id/replies.json`; it does not embed the full topic route, `PostStream`, nested replies, or a custom comments store. Publishing from the comments panel/sheet calls Discourse core post creation with the source `topic_id` and `reply_to_post_number`, stays on `/videos`, and refreshes/appends direct replies in context. Anonymous write attempts use the native login flow.
+Comments are read without route navigation. V1 uses native Discourse post JSON only: opening comments starts from direct replies to the source video post through Discourse core `GET /posts/:post_id/replies.json`, and visible descendant branches load through the same replies endpoint for each parent post. It does not embed the full topic route, `PostStream`, or a custom comments store. The payload remains native Discourse post JSON, including fields such as `reply_to_post_number`, `reply_count`, and `actions_summary`, so clients can load visible descendant replies and wire native actions without plugin-defined action enums. Publishing from the comments panel/sheet calls Discourse core post creation with the source `topic_id` and `reply_to_post_number`, stays on `/videos`, and refreshes/appends replies in context. Anonymous write attempts use the native login flow.
 
 ## Query
 
@@ -112,6 +112,7 @@ Rules:
 - Native upload URLs are emitted only after post visibility is confirmed and through current Discourse URL helpers.
 - Provider media includes `embed_url` only when `renderability` is `iframe_candidate` and the server has normalized it to a trusted HTTPS allowlisted provider URL. Fallback provider media must not include `embed_url`.
 - `native_action_summary` mirrors Discourse `PostSerializer#actions_summary` for native post action flows such as like and flag/report; clients must treat action ids as Discourse-provided values, not plugin-defined enums.
+- `counts.reply_count` is the count of visible comments under the video item, not only the direct `Post#reply_count`: OP video posts count visible topic comments excluding the source post; non-OP video posts count visible descendants through `PostReply`. Hidden, deleted, or inaccessible replies are excluded.
 
 ## Browser Rendering Rules
 
@@ -134,7 +135,35 @@ Trusted provider iframes require a compatible Discourse `frame-src` policy. The 
 
 The action rail comments button uses `[data-action="open-comments"]`. On desktop it opens `.video-shorts-comments-panel` in the `/videos` layout. On mobile it opens `.video-shorts-comments-sheet` in a Discourse `DModal` bottom sheet. Opening comments must not change `location.pathname` away from `/videos` and must not immediately open the composer or the topic route.
 
-The sheet loader consumes the core direct replies array and normalizes each reply to:
+The sheet loader consumes native Discourse serialized posts from the core replies array. Opening comments loads only direct replies to the source video post through `GET /posts/:post_id/replies.json` and must not fan out into child branch requests or topic-route batches.
+
+Child replies are collapsed by default at every depth. Any rendered post with `reply_count > 0` exposes the localized `[data-video-shorts-view-replies]` branch control. Its visible label is the generic localized "view more" text without a numeric count; source `reply_count` remains available only for branch state, pagination, and accessible labels. Clicking that control fetches one direct child page for that parent through `GET /posts/:post_id/replies.json`; double-clicks dedupe to one branch request, stale responses are ignored, and grandchildren stay collapsed until their own branch control is used. Paginated branches expose `[data-video-shorts-load-more-replies]` based on the remaining source count.
+
+Reply descendants are not rendered as child rows until the matching parent branch is opened. Counts shown in the action rail, desktop panel, mobile sheet title, and count mutation events stay source/server based and must not be replaced by the number of currently loaded DOM rows. Reply publish and delete flows may refresh only the affected parent branch; unrelated collapsed branches remain collapsed.
+
+Lazy branch loading is scoped to comments. It does not change native HLS/video rendering, provider iframe validation, or the stable action rail comments selector `[data-action="open-comments"]`.
+
+Regression coverage must preserve those boundaries: acceptance tests assert that opening comments performs only the top-level direct-replies load, performs zero branch requests before a `[data-video-shorts-view-replies]` click even when multiple parents have `reply_count`, keeps descendants collapsed until their branch is opened, and keeps server/source counts visible while branches are unloaded. Static safety checks must continue to reject clone/CDN shortcuts and unsafe rendering patterns such as `innerHTML`, `data-lucide`, Tailwind CDN usage, `@ts-ignore`, `@ts-expect-error`, `as any`, and synthetic raw `@username` reply bodies.
+
+The native reply objects include Discourse serializer fields such as:
+
+```json
+{
+  "id": 456,
+  "post_number": 2,
+  "reply_to_post_number": 1,
+  "reply_count": 3,
+  "actions_summary": [
+    {
+      "id": 2,
+      "count": 1,
+      "can_act": true
+    }
+  ]
+}
+```
+
+The comments UI normalizes each rendered reply to:
 
 ```json
 {

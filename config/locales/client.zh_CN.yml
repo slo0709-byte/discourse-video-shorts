@@ -22,6 +22,21 @@ zh_CN:
         load_more: "加载更多"
         loading_more: "正在加载..."
         load_error: "无法加载评论"
+        view_replies:
+          one: "查看更多"
+          other: "查看更多"
+        view_replies_aria:
+          one: "查看更多 %{username} 的回复"
+          other: "查看更多 %{username} 的回复"
+        load_more_replies:
+          one: "查看更多"
+          other: "查看更多"
+        load_more_replies_aria:
+          one: "查看更多 %{username} 的回复"
+          other: "查看更多 %{username} 的回复"
+        loading_replies: "正在加载回复..."
+        replies_error: "无法加载回复"
+        retry_replies: "重试加载回复"
         empty: "还没有评论"
         count:
           one: "%{count} 条回复"
@@ -33,6 +48,7 @@ zh_CN:
         reply_target_missing: "找不到要回复的评论"
         publish_error: "无法发布回复"
         reply: "回复"
+        reply_to_user: "回复 %{username}"
         edit: "编辑"
         tools: "评论工具"
         copy_link: "复制链接"

@@ -216,6 +216,46 @@ export default class VideoShortsFeed extends Component {
     );
   }
 
+  @action
+  handleCommentsPanelWheel(event) {
+    if (
+      event.target?.closest(
+        "input, textarea, select, [contenteditable='true'], [role='dialog'], [role='menu'], .modal, .composer-popup, #reply-control"
+      )
+    ) {
+      return;
+    }
+
+    const list = event.currentTarget.querySelector(
+      "[data-video-shorts-youtube-thread-list]"
+    );
+
+    if (!list || !Number.isFinite(event.deltaY)) {
+      return;
+    }
+
+    event.stopPropagation();
+
+    const maxScrollTop = Math.max(0, list.scrollHeight - list.clientHeight);
+
+    if (maxScrollTop === 0) {
+      return;
+    }
+
+    const nextScrollTop = Math.max(
+      0,
+      Math.min(maxScrollTop, list.scrollTop + event.deltaY)
+    );
+
+    if (nextScrollTop !== list.scrollTop) {
+      event.preventDefault();
+      list.scrollTop = nextScrollTop;
+      return;
+    }
+
+    event.preventDefault();
+  }
+
   activeVideo() {
     return document.querySelector(`${this.activeItemSelector} video`);
   }
@@ -479,7 +519,11 @@ export default class VideoShortsFeed extends Component {
             </button>
           </div>
 
-          <div class="video-shorts-comments-panel__body" tabindex="0">
+          <div
+            class="video-shorts-comments-panel__body"
+            tabindex="0"
+            {{on "wheel" this.handleCommentsPanelWheel}}
+          >
             <VideoShortsCommentsSurface
               @item={{this.commentsSurfaceItem}}
               @replyCount={{this.replyCountFor this.commentsSurfaceItem}}

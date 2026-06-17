@@ -23,18 +23,28 @@ import {
   fetchVideoShortsComment,
   updateVideoShortsComment,
 } from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-comment-actions";
-import {
-  fetchVideoShortsComments,
-  fetchVideoShortsTopicReplies,
-} from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-comments";
+import { fetchVideoShortsComments } from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-comments";
 import {
   createVideoShortsReply,
   videoShortsReplyErrorMessage,
 } from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-reply";
 import { videoShortsAccentStyle } from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-visual-accent";
 
+const TOP_LEVEL_COMPOSER = "reply";
+const COMMENT_REPLY_COMPOSER = "comment-reply";
+const ACTION_SHEET_INTERACTIVE_TARGET_SELECTOR =
+  "a, button, input, textarea, select, label, .video-shorts-comments-surface__tools, .video-shorts-comments-surface__tools-menu, .video-shorts-comments-surface__edit-input";
+
 function postKey(post) {
   return String(post?.post_id || post?.id || "");
+}
+
+function withoutKey(object, key) {
+  const nextObject = { ...object };
+
+  delete nextObject[key];
+
+  return nextObject;
 }
 
 function normalizeUsername(post) {
@@ -47,6 +57,69 @@ function isDeletedPlaceholder(post) {
       post?.cooked?.includes(i18n("video_shorts.comments.deleted_placeholder"))
   );
 }
+
+function isActionSheetInteractiveTarget(target) {
+  return Boolean(target?.closest?.(ACTION_SHEET_INTERACTIVE_TARGET_SELECTOR));
+}
+
+const CommentBranchControls = <template>
+  {{#if (@surface.canShowViewRepliesControl @comment)}}
+    <button
+      type="button"
+      class="video-shorts-comments-surface__text-action video-shorts-comments-surface__branch-control"
+      data-video-shorts-view-replies
+      disabled={{@surface.isLoadingReplies @comment}}
+      aria-expanded="false"
+      aria-label={{@surface.viewRepliesAriaLabel @comment}}
+      {{on "click" (fn @surface.loadReplyBranch @comment)}}
+    >
+      {{#if (@surface.isLoadingReplies @comment)}}
+        <span data-video-shorts-replies-loading>
+          {{i18n "video_shorts.comments.loading_replies"}}
+        </span>
+      {{else}}
+        {{@surface.viewRepliesLabel @comment}}
+      {{/if}}
+    </button>
+  {{else if (@surface.canShowLoadMoreRepliesControl @comment)}}
+    <button
+      type="button"
+      class="video-shorts-comments-surface__text-action video-shorts-comments-surface__branch-control"
+      data-video-shorts-load-more-replies
+      disabled={{@surface.isLoadingReplies @comment}}
+      aria-expanded="true"
+      aria-label={{@surface.loadMoreRepliesAriaLabel @comment}}
+      {{on "click" (fn @surface.loadReplyBranch @comment)}}
+    >
+      {{#if (@surface.isLoadingReplies @comment)}}
+        <span data-video-shorts-replies-loading>
+          {{i18n "video_shorts.comments.loading_replies"}}
+        </span>
+      {{else}}
+        {{@surface.loadMoreRepliesLabel @comment}}
+      {{/if}}
+    </button>
+  {{/if}}
+
+  {{#if (@surface.replyErrorFor @comment)}}
+    <div
+      class="video-shorts-comments-surface__reply-error video-shorts-comments-surface__branch-error"
+      data-video-shorts-replies-error
+      role="alert"
+    >
+      {{i18n "video_shorts.comments.replies_error"}}
+    </div>
+    <button
+      type="button"
+      class="video-shorts-comments-surface__text-action video-shorts-comments-surface__branch-control"
+      data-video-shorts-retry-replies
+      aria-label={{i18n "video_shorts.comments.retry_replies"}}
+      {{on "click" (fn @surface.loadReplyBranch @comment)}}
+    >
+      {{i18n "video_shorts.comments.retry_replies"}}
+    </button>
+  {{/if}}
+</template>;
 
 export default class VideoShortsCommentsSurface extends Component {
   @service currentUser;
@@ -80,13 +153,20 @@ export default class VideoShortsCommentsSurface extends Component {
 
   @tracked deletingPostId = null;
   @tracked openToolsPostId = null;
+  @tracked actionSheetPostId = null;
   @tracked highlightedPostId = null;
   @tracked childRepliesByPostId = {};
+  @tracked expandedReplyPostIds = {};
+  @tracked loadingReplyPostIds = {};
+  @tracked replyErrorsByPostId = {};
+  @tracked replyPaginationByPostId = {};
   @tracked localReplyCount = null;
   @tracked hasDeletedPlaceholderContext = false;
+  @tracked activeComposer = null;
 
   activePostId = null;
   loadToken = 0;
+  loadingReplyPromisesByPostId = {};
 
   loadForItem = modifier((element, [item]) => {
     if (!item || item.post_id === this.activePostId) {
@@ -96,10 +176,16 @@ export default class VideoShortsCommentsSurface extends Component {
     this.activePostId = item.post_id;
     this.comments = [];
     this.childRepliesByPostId = {};
+    this.expandedReplyPostIds = {};
+    this.loadingReplyPostIds = {};
+    this.replyErrorsByPostId = {};
+    this.replyPaginationByPostId = {};
+    this.loadingReplyPromisesByPostId = {};
     this.localReplyCount = null;
     this.hasDeletedPlaceholderContext = false;
     this.hasMore = false;
     this.nextAfter = null;
+    this.actionSheetPostId = null;
     this.resetReplyState();
     this.resetCommentReplyState();
     this.resetEditingState();
@@ -109,30 +195,40 @@ export default class VideoShortsCommentsSurface extends Component {
   focusInput = modifier((element) => {
     queueMicrotask(() => {
       if (!isDestroying(this) && !isDestroyed(this)) {
-        element.focus();
+        element.focus({ preventScroll: true });
       }
     });
   });
 
   closeToolsOnOutsideInteraction = modifier((element) => {
     const closeOnOutsidePointer = (event) => {
-      if (!this.openToolsPostId) {
+      if (
+        !this.openToolsPostId &&
+        !this.actionSheetPostId &&
+        !this.commentReplyPostId
+      ) {
         return;
       }
 
       if (
         element.contains(event.target) &&
-        event.target.closest(".video-shorts-comments-surface__tools")
+        event.target.closest(
+          ".video-shorts-comments-surface__tools, .video-shorts-comments-surface__action-sheet, .video-shorts-comments-surface__reply-dialog",
+        )
       ) {
         return;
       }
 
       this.closeTools();
+      this.closeActionSheet();
+      this.cancelCommentReply();
     };
 
     const closeOnEscape = (event) => {
       if (event.key === "Escape") {
         this.closeTools();
+        this.closeActionSheet();
+        this.cancelCommentReply();
       }
     };
 
@@ -146,18 +242,44 @@ export default class VideoShortsCommentsSurface extends Component {
   });
 
   childRepliesFor = (comment) => {
-    return (
-      this.childRepliesByPostId[postKey(comment)] ||
-      comment.replies ||
-      []
-    );
+    return this.childRepliesByPostId[postKey(comment)] || [];
   };
 
   hasChildReplies = (comment) => {
-    return this.childRepliesFor(comment).length > 0;
+    return this.visualRepliesFor(comment).length > 0;
   };
 
-  deepRepliesFor = (comment) => {
+  isTopLevelDisplayComment = (comment) => {
+    const key = postKey(comment);
+
+    return Boolean(
+      key && this.comments.some((candidate) => postKey(candidate) === key)
+    );
+  };
+
+  visualReplyHostFor = (comment) => {
+    let host = this.findCommentByPostId(postKey(comment)) || comment;
+    let guard = 0;
+
+    while (host && !this.isTopLevelDisplayComment(host) && guard < 20) {
+      const parent = this.findCommentByPostNumber(host.reply_to_post_number);
+
+      if (!parent || postKey(parent) === postKey(host)) {
+        break;
+      }
+
+      host = parent;
+      guard += 1;
+    }
+
+    return host || comment;
+  };
+
+  visualRepliesFor = (comment) => {
+    if (!this.isTopLevelDisplayComment(comment)) {
+      return [];
+    }
+
     return this.flattenChildReplies(comment);
   };
 
@@ -189,6 +311,152 @@ export default class VideoShortsCommentsSurface extends Component {
     return Boolean(post?.can_flag);
   };
 
+  canShowEditAction = (post) => {
+    return !isDeletedPlaceholder(post) && this.canEditComment(post);
+  };
+
+  canShowDeleteAction = (post) => {
+    return !isDeletedPlaceholder(post) && this.canDeleteComment(post);
+  };
+
+  canShowFlagAction = (post) => {
+    return !isDeletedPlaceholder(post) && this.canFlagComment(post);
+  };
+
+  hasCommentLinkAction = (post) => {
+    return Boolean(post?.post_url);
+  };
+
+  canShowReplyAction = () => {
+    return !this.currentUser || this.canCreatePost;
+  };
+
+  replyActionUsesMentionLabel = (post) => {
+    const postNumber = Number(post?.post_number || 0);
+    const sourcePostNumber = Number(this.item?.post_number || 0);
+
+    return Boolean(postNumber && postNumber !== sourcePostNumber);
+  };
+
+  replyDisplayTargetLabel = (post) => {
+    const replyToPostNumber = Number(post?.reply_to_post_number || 0);
+    const sourcePostNumber = Number(this.item?.post_number || 0);
+
+    if (!replyToPostNumber || replyToPostNumber === sourcePostNumber) {
+      return null;
+    }
+
+    const parent = this.findCommentByPostNumber(replyToPostNumber);
+
+    if (!parent) {
+      return null;
+    }
+
+    const username = post?.reply_to_username || normalizeUsername(parent);
+
+    if (!username) {
+      return null;
+    }
+
+    return username.startsWith("@") ? username : `@${username}`;
+  };
+
+  hasLoadedReplyBranch = (comment) => {
+    return Object.prototype.hasOwnProperty.call(
+      this.childRepliesByPostId,
+      postKey(comment)
+    );
+  };
+
+  hasExpandedReplies = (comment) => {
+    return Boolean(this.expandedReplyPostIds[postKey(comment)]);
+  };
+
+  isLoadingReplies = (comment) => {
+    return Boolean(this.loadingReplyPostIds[postKey(comment)]);
+  };
+
+  replyErrorFor = (comment) => {
+    return this.replyErrorsByPostId[postKey(comment)] || null;
+  };
+
+  replyPaginationFor = (comment) => {
+    return this.replyPaginationByPostId[postKey(comment)] || {
+      hasMore: false,
+      nextAfter: null,
+    };
+  };
+
+  replyBranchRemainingCount = (comment) => {
+    const replyCount = Number(comment?.reply_count || 0);
+    const loadedCount = this.childRepliesFor(comment).length;
+    const pagination = this.replyPaginationFor(comment);
+
+    if (pagination.hasMore) {
+      return Math.max(replyCount - loadedCount, 0);
+    }
+
+    return replyCount;
+  };
+
+  canShowReplyBranchControl = (comment) => {
+    if (
+      !this.isTopLevelDisplayComment(comment) ||
+      Number(comment?.reply_count || 0) <= 0
+    ) {
+      return false;
+    }
+
+    const pagination = this.replyPaginationFor(comment);
+
+    return !this.hasExpandedReplies(comment) || pagination.hasMore;
+  };
+
+  canShowViewRepliesControl = (comment) => {
+    return (
+      this.canShowReplyBranchControl(comment) && !this.hasExpandedReplies(comment)
+    );
+  };
+
+  canShowLoadMoreRepliesControl = (comment) => {
+    return (
+      this.canShowReplyBranchControl(comment) &&
+      this.hasExpandedReplies(comment) &&
+      this.replyPaginationFor(comment).hasMore &&
+      this.replyBranchRemainingCount(comment) > 0
+    );
+  };
+
+  viewRepliesLabel = (comment) => {
+    return i18n("video_shorts.comments.view_replies", {
+      count: this.replyBranchRemainingCount(comment),
+    });
+  };
+
+  viewRepliesAriaLabel = (comment) => {
+    return i18n("video_shorts.comments.view_replies_aria", {
+      count: this.replyBranchRemainingCount(comment),
+      username: this.displayName(comment),
+    });
+  };
+
+  loadMoreRepliesLabel = (comment) => {
+    return i18n("video_shorts.comments.load_more_replies", {
+      count: this.replyBranchRemainingCount(comment),
+    });
+  };
+
+  loadMoreRepliesAriaLabel = (comment) => {
+    return i18n("video_shorts.comments.load_more_replies_aria", {
+      count: this.replyBranchRemainingCount(comment),
+      username: this.displayName(comment),
+    });
+  };
+
+  deepRepliesFor = () => {
+    return [];
+  };
+
   flattenChildReplies(comment) {
     return this.childRepliesFor(comment).flatMap((reply) => {
       return [
@@ -204,12 +472,24 @@ export default class VideoShortsCommentsSurface extends Component {
     }, 0);
   }
 
+  sourceReplyCount() {
+    const replyCount = Number(this.args.replyCount);
+
+    if (Number.isFinite(replyCount)) {
+      return replyCount;
+    }
+
+    const itemReplyCount = Number(this.item?.counts?.reply_count);
+
+    if (Number.isFinite(itemReplyCount)) {
+      return itemReplyCount;
+    }
+
+    return this.commentTreeCount();
+  }
+
   syncLoadedReplyCount() {
-    const loadedCount = this.commentTreeCount();
-    const existingCount = Number(this.args.replyCount);
-    const replyCountValue = Number.isFinite(existingCount)
-      ? Math.max(existingCount, loadedCount)
-      : loadedCount;
+    const replyCountValue = this.sourceReplyCount();
 
     this.localReplyCount = replyCountValue;
     this.emitCommentMutation({
@@ -281,13 +561,27 @@ export default class VideoShortsCommentsSurface extends Component {
   }
 
   get replyCountLabel() {
-    const count = this.comments.length;
+    const count = Number.isFinite(this.localReplyCount)
+      ? this.localReplyCount
+      : this.sourceReplyCount();
 
     return i18n("video_shorts.comments.count", { count });
   }
 
+  get replyActionsVisible() {
+    return this.activeComposer === TOP_LEVEL_COMPOSER || this.replySubmitting;
+  }
+
+  get commentReplyActionsVisible() {
+    return Boolean(this.commentReplyPostId) || this.commentReplySubmitting;
+  }
+
   get selectedReplyTarget() {
     return this.findCommentByPostId(this.commentReplyPostId);
+  }
+
+  get selectedActionSheetComment() {
+    return this.findCommentByPostId(this.actionSheetPostId);
   }
 
   get selectedReplyUsername() {
@@ -322,12 +616,32 @@ export default class VideoShortsCommentsSurface extends Component {
     });
   }
 
+  get commentReplyPlaceholder() {
+    if (this.selectedReplyTargetUsesMentionLabel) {
+      return i18n("video_shorts.comments.reply_to_user", {
+        username: this.selectedReplyUsernameLabel,
+      });
+    }
+
+    return i18n("video_shorts.comments.reply");
+  }
+
+  get commentReplyDialogLabel() {
+    const username = this.selectedReplyUsernameLabel;
+
+    if (username) {
+      return i18n("video_shorts.comments.reply_to_user", { username });
+    }
+
+    return i18n("video_shorts.comments.reply");
+  }
+
   get currentUserAvatarUrl() {
     return (this.currentUser?.avatar_template || "").replace("{size}", 40);
   }
 
   async loadComments({ append = false, item = this.item } = {}) {
-    const token = ++this.loadToken;
+    const token = append ? this.loadToken : ++this.loadToken;
 
     try {
       this.error = null;
@@ -343,11 +657,7 @@ export default class VideoShortsCommentsSurface extends Component {
         return;
       }
 
-      const comments = await this.withLoadedChildren(response.comments, token);
-
-      if (this.isStale(token)) {
-        return;
-      }
+      const comments = this.commentsWithoutLoadedChildren(response.comments);
 
       const existingIds = append
         ? new Set(this.comments.map((comment) => comment.id))
@@ -358,6 +668,11 @@ export default class VideoShortsCommentsSurface extends Component {
 
       if (!append) {
         this.childRepliesByPostId = {};
+        this.expandedReplyPostIds = {};
+        this.loadingReplyPostIds = {};
+        this.replyErrorsByPostId = {};
+        this.replyPaginationByPostId = {};
+        this.loadingReplyPromisesByPostId = {};
       }
 
       this.comments = append ? [...this.comments, ...deduped] : deduped;
@@ -378,38 +693,154 @@ export default class VideoShortsCommentsSurface extends Component {
     }
   }
 
-  async withLoadedChildren(comments, token) {
-    const loaded = await Promise.all(
-      comments.map(async (comment) => {
-        if (comment.replies?.length) {
-          const replies = await this.withLoadedChildren(comment.replies, token);
-
-          return this.isStale(token) ? comment : { ...comment, replies };
-        }
-
-        if (!comment.reply_count) {
-          return { ...comment, replies: [] };
-        }
-
-        const response = await fetchVideoShortsComments({
-          postId: comment.post_id,
-        });
-
-        if (this.isStale(token)) {
-          return comment;
-        }
-
-        const replies = await this.withLoadedChildren(response.comments, token);
-
-        return this.isStale(token) ? comment : { ...comment, replies };
-      })
-    );
-
-    return loaded;
+  commentsWithoutLoadedChildren(comments = []) {
+    return comments.map((comment) => {
+      return {
+        ...comment,
+        replies: [],
+      };
+    });
   }
 
-  isStale(token) {
-    return isDestroying(this) || isDestroyed(this) || token !== this.loadToken;
+  currentItemIdentity(item = this.item) {
+    return [
+      item?.topic_id || "",
+      item?.post_id || "",
+      item?.post_number || "",
+      item?.topic_url || "",
+    ].join(":");
+  }
+
+  isStale(token, itemIdentity = null) {
+    return (
+      isDestroying(this) ||
+      isDestroyed(this) ||
+      token !== this.loadToken ||
+      (itemIdentity && itemIdentity !== this.currentItemIdentity())
+    );
+  }
+
+  updateReplyBranchComment(comment, children) {
+    const targetKey = postKey(comment);
+
+    const updateInTree = (comments) => {
+      return comments.map((candidate) => {
+        const currentChildren = this.childRepliesFor(candidate);
+        let nextCandidate = candidate;
+
+        if (postKey(candidate) === targetKey) {
+          nextCandidate = {
+            ...candidate,
+            replies: children,
+          };
+        } else if (currentChildren.length) {
+          nextCandidate = {
+            ...candidate,
+            replies: updateInTree(currentChildren),
+          };
+        }
+
+        return nextCandidate;
+      });
+    };
+
+    this.comments = updateInTree(this.comments);
+  }
+
+  @action
+  loadReplyBranch(comment, event) {
+    event?.preventDefault();
+    event?.stopPropagation();
+
+    const key = postKey(comment);
+
+    if (!key) {
+      return;
+    }
+
+    const existingRequest = this.loadingReplyPromisesByPostId[key];
+
+    if (existingRequest) {
+      return existingRequest;
+    }
+
+    const append = this.hasExpandedReplies(comment);
+    const pagination = this.replyPaginationFor(comment);
+
+    if (append && !pagination.hasMore) {
+      return;
+    }
+
+    const token = this.loadToken;
+    const itemIdentity = this.currentItemIdentity();
+    let request;
+
+    this.loadingReplyPostIds = {
+      ...this.loadingReplyPostIds,
+      [key]: true,
+    };
+    this.replyErrorsByPostId = withoutKey(this.replyErrorsByPostId, key);
+
+    request = (async () => {
+      try {
+        const response = await fetchVideoShortsComments({
+          postId: comment.post_id,
+          after: append ? pagination.nextAfter : null,
+        });
+
+        if (this.isStale(token, itemIdentity)) {
+          return;
+        }
+
+        const currentChildren = append ? this.childRepliesFor(comment) : [];
+        const children = this.uniqueReplies([
+          ...currentChildren,
+          ...this.commentsWithoutLoadedChildren(response.comments),
+        ]);
+
+        this.childRepliesByPostId = {
+          ...this.childRepliesByPostId,
+          [key]: children,
+        };
+        this.expandedReplyPostIds = {
+          ...this.expandedReplyPostIds,
+          [key]: true,
+        };
+        this.replyPaginationByPostId = {
+          ...this.replyPaginationByPostId,
+          [key]: {
+            hasMore: response.hasMore,
+            nextAfter: response.nextAfter,
+          },
+        };
+        this.updateReplyBranchComment(comment, children);
+      } catch (error) {
+        if (!this.isStale(token, itemIdentity)) {
+          this.replyErrorsByPostId = {
+            ...this.replyErrorsByPostId,
+            [key]: error,
+          };
+        }
+      } finally {
+        if (this.loadingReplyPromisesByPostId[key] === request) {
+          this.loadingReplyPromisesByPostId = withoutKey(
+            this.loadingReplyPromisesByPostId,
+            key
+          );
+        }
+
+        if (!this.isStale(token, itemIdentity)) {
+          this.loadingReplyPostIds = withoutKey(this.loadingReplyPostIds, key);
+        }
+      }
+    })();
+
+    this.loadingReplyPromisesByPostId = {
+      ...this.loadingReplyPromisesByPostId,
+      [key]: request,
+    };
+
+    return request;
   }
 
   async refreshCommentsAfterMutation({ highlightedPostId = null } = {}) {
@@ -437,7 +868,7 @@ export default class VideoShortsCommentsSurface extends Component {
 
     const childKeys = new Set(
       placeholders.flatMap((placeholder) => {
-        return this.childRepliesFor(placeholder).map((child) => postKey(child));
+        return (placeholder.replies || []).map((child) => postKey(child));
       })
     );
     const existingKeys = new Set(this.comments.map((comment) => postKey(comment)));
@@ -507,8 +938,15 @@ export default class VideoShortsCommentsSurface extends Component {
       ...this.childRepliesFor(comment),
       ...this.loadedFlatChildrenFor(comment),
     ]);
+    const key = postKey(comment);
+    const replyCount = Number(comment?.reply_count || 0);
+    const pagination = this.replyPaginationFor(comment);
+    const hasCompleteLocalBranch =
+      this.hasLoadedReplyBranch(comment) &&
+      !pagination.hasMore &&
+      currentChildren.length >= replyCount;
 
-    if (currentChildren.length) {
+    if (!replyCount || hasCompleteLocalBranch) {
       return currentChildren;
     }
 
@@ -516,17 +954,33 @@ export default class VideoShortsCommentsSurface extends Component {
       const response = await fetchVideoShortsComments({
         postId: comment.post_id,
       });
-      const topicReplies = await fetchVideoShortsTopicReplies({
-        topicUrl: this.item.topic_url,
-        replyToPostNumber: comment.post_number,
-      });
 
-      return this.uniqueReplies([
+      const children = this.uniqueReplies([
+        ...this.commentsWithoutLoadedChildren(response.comments),
         ...currentChildren,
-        ...response.comments,
-        ...topicReplies,
         ...this.loadedFlatChildrenFor(comment),
       ]);
+
+      if (key) {
+        this.childRepliesByPostId = {
+          ...this.childRepliesByPostId,
+          [key]: children,
+        };
+        this.expandedReplyPostIds = {
+          ...this.expandedReplyPostIds,
+          [key]: true,
+        };
+        this.replyPaginationByPostId = {
+          ...this.replyPaginationByPostId,
+          [key]: {
+            hasMore: response.hasMore,
+            nextAfter: response.nextAfter,
+          },
+        };
+        this.updateReplyBranchComment(comment, children);
+      }
+
+      return children;
     } catch {
       return currentChildren;
     }
@@ -652,7 +1106,10 @@ export default class VideoShortsCommentsSurface extends Component {
             can_edit: false,
             can_delete: false,
             can_flag: false,
-            reply_count: children.length,
+            reply_count: Math.max(
+              Number(comment?.reply_count || 0),
+              children.length
+            ),
             replies: children,
           });
           continue;
@@ -678,7 +1135,10 @@ export default class VideoShortsCommentsSurface extends Component {
 
           nextComments.push({
             ...comment,
-            reply_count: childResult.comments.length,
+            reply_count: Math.max(
+              Number(comment?.reply_count || 0) - 1,
+              childResult.comments.length
+            ),
             replies: childResult.comments,
           });
           continue;
@@ -698,6 +1158,10 @@ export default class VideoShortsCommentsSurface extends Component {
 
     if (keptPlaceholder) {
       this.hasDeletedPlaceholderContext = true;
+      this.expandedReplyPostIds = {
+        ...this.expandedReplyPostIds,
+        [targetKey]: true,
+      };
     }
 
     if (countDelta === 0) {
@@ -736,8 +1200,35 @@ export default class VideoShortsCommentsSurface extends Component {
     return this.findCommentInTree(this.comments, postId);
   }
 
+  findCommentByPostNumber(postNumber) {
+    const targetNumber = Number(postNumber || 0);
+
+    if (!targetNumber) {
+      return null;
+    }
+
+    const findInTree = (comments) => {
+      for (const comment of comments) {
+        if (Number(comment?.post_number || 0) === targetNumber) {
+          return comment;
+        }
+
+        const child = findInTree(this.childRepliesFor(comment));
+
+        if (child) {
+          return child;
+        }
+      }
+
+      return null;
+    };
+
+    return findInTree(this.comments);
+  }
+
   appendChildReply(parentComment, childReply) {
-    const parentKey = postKey(parentComment);
+    const displayParent = this.visualReplyHostFor(parentComment);
+    const parentKey = postKey(displayParent);
     const nextChildRepliesByPostId = { ...this.childRepliesByPostId };
     let appended = false;
 
@@ -778,6 +1269,63 @@ export default class VideoShortsCommentsSurface extends Component {
 
     if (appended) {
       this.childRepliesByPostId = nextChildRepliesByPostId;
+      this.expandedReplyPostIds = {
+        ...this.expandedReplyPostIds,
+        [parentKey]: true,
+      };
+    }
+
+    return appended;
+  }
+
+  async refreshReplyBranchAfterCreate(parentComment, createdReply, shouldRefresh) {
+    if (!shouldRefresh) {
+      return;
+    }
+
+    const displayParent = this.visualReplyHostFor(parentComment);
+    const key = postKey(displayParent);
+    const token = this.loadToken;
+    const itemIdentity = this.currentItemIdentity();
+
+    try {
+      const response = await fetchVideoShortsComments({
+        postId: displayParent.post_id,
+      });
+
+      if (this.isStale(token, itemIdentity)) {
+        return;
+      }
+
+      const children = this.uniqueReplies([
+        ...this.commentsWithoutLoadedChildren(response.comments),
+        createdReply,
+      ]);
+
+      this.childRepliesByPostId = {
+        ...this.childRepliesByPostId,
+        [key]: children,
+      };
+      this.expandedReplyPostIds = {
+        ...this.expandedReplyPostIds,
+        [key]: true,
+      };
+      this.replyPaginationByPostId = {
+        ...this.replyPaginationByPostId,
+        [key]: {
+          hasMore: response.hasMore,
+          nextAfter: response.nextAfter,
+        },
+      };
+      this.updateReplyBranchComment(displayParent, children);
+    } catch {
+      this.replyPaginationByPostId = {
+        ...this.replyPaginationByPostId,
+        [key]: {
+          hasMore: true,
+          nextAfter: null,
+        },
+      };
     }
   }
 
@@ -805,6 +1353,7 @@ export default class VideoShortsCommentsSurface extends Component {
     this.replyError = null;
     this.replyNotice = null;
     this.replySubmitting = false;
+    this.activeComposer = null;
   }
 
   resetCommentReplyState() {
@@ -814,6 +1363,9 @@ export default class VideoShortsCommentsSurface extends Component {
     this.commentReplyNotice = null;
     this.commentReplySubmitting = false;
     this.commentReplyMentionRequired = false;
+    if (this.activeComposer === COMMENT_REPLY_COMPOSER) {
+      this.activeComposer = null;
+    }
   }
 
   resetEditingState() {
@@ -847,6 +1399,8 @@ export default class VideoShortsCommentsSurface extends Component {
 
     this.resetCommentReplyState();
     this.openToolsPostId = null;
+    this.actionSheetPostId = null;
+    this.activeComposer = TOP_LEVEL_COMPOSER;
   }
 
   @action
@@ -870,9 +1424,38 @@ export default class VideoShortsCommentsSurface extends Component {
     this.commentReplyText = "";
     this.commentReplyError = null;
     this.commentReplyNotice = null;
-    this.commentReplyMentionRequired = Boolean(mentionRequired);
+    this.commentReplyMentionRequired =
+      Boolean(mentionRequired) || this.replyActionUsesMentionLabel(target);
+    this.activeComposer = COMMENT_REPLY_COMPOSER;
     this.openToolsPostId = null;
+    this.actionSheetPostId = null;
     this.resetEditingState();
+  }
+
+  @action
+  focusCommentReplyInput() {
+    if (this.commentReplyPostId) {
+      this.activeComposer = COMMENT_REPLY_COMPOSER;
+    }
+  }
+
+  @action
+  deactivateComposerOnFocusOut(event) {
+    const form = event.currentTarget;
+
+    if (form.contains(event.relatedTarget)) {
+      return;
+    }
+
+    requestAnimationFrame(() => {
+      if (
+        !isDestroying(this) &&
+        !isDestroyed(this) &&
+        !form.contains(document.activeElement)
+      ) {
+        this.activeComposer = null;
+      }
+    });
   }
 
   @action
@@ -888,6 +1471,11 @@ export default class VideoShortsCommentsSurface extends Component {
   @action
   cancelCommentReply() {
     this.resetCommentReplyState();
+  }
+
+  @action
+  cancelReply() {
+    this.resetReplyState();
   }
 
   @action
@@ -991,7 +1579,17 @@ export default class VideoShortsCommentsSurface extends Component {
       }
 
       if (this.hasRenderablePostData(result.post)) {
+        const displayParent = this.visualReplyHostFor(target);
+        const shouldRefreshBranch =
+          !this.hasLoadedReplyBranch(displayParent) &&
+          Number(displayParent?.reply_count || 0) > 0;
+
         this.appendChildReply(target, result.post);
+        await this.refreshReplyBranchAfterCreate(
+          displayParent,
+          result.post,
+          shouldRefreshBranch
+        );
         this.highlightedPostId = postKey(result.post);
         this.emitCreatedComment(result.post);
       } else {
@@ -1013,6 +1611,7 @@ export default class VideoShortsCommentsSurface extends Component {
     }
 
     this.openToolsPostId = null;
+    this.actionSheetPostId = null;
     this.editingPostId = postKey(comment);
     this.editingError = null;
 
@@ -1084,6 +1683,35 @@ export default class VideoShortsCommentsSurface extends Component {
   }
 
   @action
+  openActionSheet(comment, event) {
+    if (isActionSheetInteractiveTarget(event?.target)) {
+      return;
+    }
+
+    this.actionSheetPostId = postKey(comment);
+    this.openToolsPostId = null;
+  }
+
+  @action
+  openActionSheetFromKeyboard(comment, event) {
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
+    }
+
+    if (isActionSheetInteractiveTarget(event.target)) {
+      return;
+    }
+
+    event.preventDefault();
+    this.openActionSheet(comment, event);
+  }
+
+  @action
+  closeActionSheet() {
+    this.actionSheetPostId = null;
+  }
+
+  @action
   stopPropagation(event) {
     event.stopPropagation();
   }
@@ -1091,6 +1719,7 @@ export default class VideoShortsCommentsSurface extends Component {
   @action
   async copyCommentLink(comment) {
     this.openToolsPostId = null;
+    this.actionSheetPostId = null;
 
     if (comment.post_url) {
       await clipboardCopy(getAbsoluteURL(comment.post_url)).catch(popupAjaxError);
@@ -1100,6 +1729,7 @@ export default class VideoShortsCommentsSurface extends Component {
   @action
   openCommentTopic(comment) {
     this.openToolsPostId = null;
+    this.actionSheetPostId = null;
 
     if (comment.post_url) {
       window.open(comment.post_url, "_blank", "noopener,noreferrer");
@@ -1117,6 +1747,7 @@ export default class VideoShortsCommentsSurface extends Component {
     }
 
     this.openToolsPostId = null;
+    this.actionSheetPostId = null;
     const post = this.commentPostRecord(comment);
 
     this.modal.show(FlagModal, {
@@ -1135,6 +1766,7 @@ export default class VideoShortsCommentsSurface extends Component {
     }
 
     this.openToolsPostId = null;
+    this.actionSheetPostId = null;
     this.dialog.yesNoConfirm({
       message: i18n("video_shorts.comments.delete_confirm"),
       didConfirm: async () => {
@@ -1195,6 +1827,88 @@ export default class VideoShortsCommentsSurface extends Component {
           class="video-shorts-comments-surface__list"
           data-video-shorts-youtube-thread-list
         >
+          {{#if this.currentUser}}
+            <li
+              class="video-shorts-comments-surface__top-composer"
+              data-video-shorts-youtube-composer
+            >
+              <form
+                class="video-shorts-comments-surface__reply-form"
+                {{on "submit" this.publishReply}}
+                {{on "focusout" this.deactivateComposerOnFocusOut}}
+              >
+                <div class="video-shorts-comments-surface__composer-row">
+                  {{#if this.currentUserAvatarUrl}}
+                    <img
+                      class="video-shorts-comments-surface__composer-avatar"
+                      src={{this.currentUserAvatarUrl}}
+                      alt=""
+                    />
+                  {{else}}
+                    <span
+                      class="video-shorts-comments-surface__composer-avatar video-shorts-comments-surface__composer-avatar--placeholder"
+                    ></span>
+                  {{/if}}
+
+                  <div class="video-shorts-comments-surface__composer-body">
+                    <textarea
+                      data-video-shorts-reply-input
+                      data-action="reply"
+                      value={{this.replyText}}
+                      disabled={{this.replySubmitting}}
+                      placeholder={{i18n "video_shorts.comments.reply"}}
+                      {{on "focus" this.openReply}}
+                      {{on "input" this.updateReplyText}}
+                    ></textarea>
+
+                    {{#if this.replyError}}
+                      <p
+                        class="video-shorts-comments-surface__reply-error"
+                        role="alert"
+                      >
+                        {{this.replyError}}
+                      </p>
+                    {{/if}}
+
+                    {{#if this.replyNotice}}
+                      <p class="video-shorts-comments-surface__reply-notice">
+                        {{this.replyNotice}}
+                      </p>
+                    {{/if}}
+
+                    {{#if this.replyActionsVisible}}
+                      <div
+                        class="video-shorts-comments-surface__form-actions"
+                        data-video-shorts-reply-actions
+                      >
+                        <button
+                          type="button"
+                          class="btn-flat"
+                          data-action="cancel-reply"
+                          {{on "click" this.cancelReply}}
+                        >
+                          {{i18n "video_shorts.comments.cancel"}}
+                        </button>
+                        <button
+                          type="submit"
+                          class="btn btn-primary"
+                          data-action="publish-reply"
+                          disabled={{this.replySubmitting}}
+                        >
+                          {{if
+                            this.replySubmitting
+                            (i18n "video_shorts.comments.publishing")
+                            (i18n "video_shorts.comments.publish")
+                          }}
+                        </button>
+                      </div>
+                    {{/if}}
+                  </div>
+                </div>
+              </form>
+            </li>
+          {{/if}}
+
           {{#each this.comments as |comment|}}
             <li
               class="video-shorts-comments-surface__comment"
@@ -1206,7 +1920,9 @@ export default class VideoShortsCommentsSurface extends Component {
                 "false"
               }}
             >
-              <article class="video-shorts-comments-surface__comment-card">
+              <article
+                class="video-shorts-comments-surface__comment-card"
+              >
                 <a
                   class="video-shorts-comments-surface__avatar-link"
                   href={{this.userPathFor comment}}
@@ -1283,7 +1999,24 @@ export default class VideoShortsCommentsSurface extends Component {
                       </div>
                     </form>
                   {{else}}
-                    <div class="video-shorts-comments-surface__cooked">
+                    <div
+                      class="video-shorts-comments-surface__cooked"
+                      role="button"
+                      tabindex="0"
+                      {{on "click" (fn this.openActionSheet comment)}}
+                      {{on
+                        "keydown"
+                        (fn this.openActionSheetFromKeyboard comment)
+                      }}
+                    >
+                      {{#if (this.replyDisplayTargetLabel comment)}}
+                        <span
+                          class="video-shorts-comments-surface__reply-target-label"
+                          data-video-shorts-reply-target
+                        >
+                          {{this.replyDisplayTargetLabel comment}}
+                        </span>
+                      {{/if}}
                       {{trustHTML comment.cooked}}
                     </div>
                   {{/if}}
@@ -1294,7 +2027,7 @@ export default class VideoShortsCommentsSurface extends Component {
                       class="video-shorts-comments-surface__text-action"
                       data-action="reply-to-comment"
                       data-post-id={{comment.post_id}}
-                      {{on "click" (fn this.openCommentReply comment false)}}
+                      {{on "click" (fn this.openCommentReply comment true)}}
                     >
                       {{i18n "video_shorts.comments.reply"}}
                     </button>
@@ -1395,9 +2128,17 @@ export default class VideoShortsCommentsSurface extends Component {
                     </div>
                   {{/if}}
 
+                  <CommentBranchControls
+                    @comment={{comment}}
+                    @surface={{this}}
+                  />
+
                   {{#if (this.hasChildReplies comment)}}
-                    <ol class="video-shorts-comments-surface__child-list">
-                      {{#each (this.childRepliesFor comment) as |childReply|}}
+                    <ol
+                      class="video-shorts-comments-surface__child-list"
+                      data-video-shorts-child-list
+                    >
+                      {{#each (this.visualRepliesFor comment) as |childReply|}}
                         <li
                           class="video-shorts-comments-surface__child-comment"
                           data-post-id={{childReply.post_id}}
@@ -1486,7 +2227,27 @@ export default class VideoShortsCommentsSurface extends Component {
                                 </div>
                               </form>
                             {{else}}
-                              <div class="video-shorts-comments-surface__cooked">
+                              <div
+                                class="video-shorts-comments-surface__cooked"
+                                role="button"
+                                tabindex="0"
+                                {{on "click" (fn this.openActionSheet childReply)}}
+                                {{on
+                                  "keydown"
+                                  (fn
+                                    this.openActionSheetFromKeyboard
+                                    childReply
+                                  )
+                                }}
+                              >
+                                {{#if (this.replyDisplayTargetLabel childReply)}}
+                                  <span
+                                    class="video-shorts-comments-surface__reply-target-label"
+                                    data-video-shorts-reply-target
+                                  >
+                                    {{this.replyDisplayTargetLabel childReply}}
+                                  </span>
+                                {{/if}}
                                 {{trustHTML childReply.cooked}}
                               </div>
                             {{/if}}
@@ -1603,8 +2364,16 @@ export default class VideoShortsCommentsSurface extends Component {
                               </div>
                             {{/if}}
 
+                            <CommentBranchControls
+                              @comment={{childReply}}
+                              @surface={{this}}
+                            />
+
                             {{#if (this.hasChildReplies childReply)}}
-                              <ol class="video-shorts-comments-surface__child-list">
+                              <ol
+                                class="video-shorts-comments-surface__child-list"
+                                data-video-shorts-child-list
+                              >
                                 {{#each
                                   (this.childRepliesFor childReply)
                                   as |grandchildReply|
@@ -1712,7 +2481,38 @@ export default class VideoShortsCommentsSurface extends Component {
                                           </div>
                                         </form>
                                       {{else}}
-                                        <div class="video-shorts-comments-surface__cooked">
+                                        <div
+                                          class="video-shorts-comments-surface__cooked"
+                                          role="button"
+                                          tabindex="0"
+                                          {{on
+                                            "click"
+                                            (fn
+                                              this.openActionSheet
+                                              grandchildReply
+                                            )
+                                          }}
+                                          {{on
+                                            "keydown"
+                                            (fn
+                                              this.openActionSheetFromKeyboard
+                                              grandchildReply
+                                            )
+                                          }}
+                                        >
+                                          {{#if
+                                            (this.replyDisplayTargetLabel
+                                              grandchildReply)
+                                          }}
+                                            <span
+                                              class="video-shorts-comments-surface__reply-target-label"
+                                              data-video-shorts-reply-target
+                                            >
+                                              {{this.replyDisplayTargetLabel
+                                                grandchildReply
+                                              }}
+                                            </span>
+                                          {{/if}}
                                           {{trustHTML grandchildReply.cooked}}
                                         </div>
                                       {{/if}}
@@ -1902,11 +2702,17 @@ export default class VideoShortsCommentsSurface extends Component {
                                         </div>
                                       {{/if}}
 
+                                      <CommentBranchControls
+                                        @comment={{grandchildReply}}
+                                        @surface={{this}}
+                                      />
+
                                       {{#if
                                         (this.hasChildReplies grandchildReply)
                                       }}
                                         <ol
                                           class="video-shorts-comments-surface__child-list video-shorts-comments-surface__child-list--deep"
+                                          data-video-shorts-child-list
                                         >
                                           {{#each
                                             (this.deepRepliesFor grandchildReply)
@@ -2048,7 +2854,36 @@ export default class VideoShortsCommentsSurface extends Component {
                                                 {{else}}
                                                   <div
                                                     class="video-shorts-comments-surface__cooked"
+                                                    role="button"
+                                                    tabindex="0"
+                                                    {{on
+                                                      "click"
+                                                      (fn
+                                                        this.openActionSheet
+                                                        deepReply
+                                                      )
+                                                    }}
+                                                    {{on
+                                                      "keydown"
+                                                      (fn
+                                                        this.openActionSheetFromKeyboard
+                                                        deepReply
+                                                      )
+                                                    }}
                                                   >
+                                                    {{#if
+                                                      (this.replyDisplayTargetLabel
+                                                        deepReply)
+                                                    }}
+                                                      <span
+                                                        class="video-shorts-comments-surface__reply-target-label"
+                                                        data-video-shorts-reply-target
+                                                      >
+                                                        {{this.replyDisplayTargetLabel
+                                                          deepReply
+                                                        }}
+                                                      </span>
+                                                    {{/if}}
                                                     {{trustHTML
                                                       deepReply.cooked
                                                     }}
@@ -2262,6 +3097,11 @@ export default class VideoShortsCommentsSurface extends Component {
                                                     </span>
                                                   </div>
                                                 {{/if}}
+
+                                                <CommentBranchControls
+                                                  @comment={{deepReply}}
+                                                  @surface={{this}}
+                                                />
                                               </div>
                                             </li>
                                           {{/each}}
@@ -2302,16 +3142,130 @@ export default class VideoShortsCommentsSurface extends Component {
             }}
           </button>
         {{/if}}
+
+        {{#if this.selectedActionSheetComment}}
+          <div
+            class="video-shorts-comments-surface__action-sheet"
+            data-video-shorts-comment-action-sheet
+            data-post-id={{this.selectedActionSheetComment.post_id}}
+            role="menu"
+            {{on "click" this.stopPropagation}}
+          >
+            {{#if (this.canShowReplyAction this.selectedActionSheetComment)}}
+              <button
+                type="button"
+                role="menuitem"
+                data-action="reply-to-comment"
+                {{on
+                  "click"
+                  (fn
+                    this.openCommentReply
+                    this.selectedActionSheetComment
+                    (this.replyActionUsesMentionLabel
+                      this.selectedActionSheetComment
+                    )
+                  )
+                }}
+              >
+                {{dIcon "reply"}}
+                <span>{{i18n "video_shorts.comments.reply"}}</span>
+              </button>
+            {{/if}}
+
+            {{#if (this.canShowEditAction this.selectedActionSheetComment)}}
+              <button
+                type="button"
+                role="menuitem"
+                data-action="edit-comment"
+                {{on "click" (fn this.openEdit this.selectedActionSheetComment)}}
+              >
+                {{dIcon "pencil"}}
+                <span>{{i18n "video_shorts.comments.edit"}}</span>
+              </button>
+            {{/if}}
+
+            {{#if (this.hasCommentLinkAction this.selectedActionSheetComment)}}
+              <button
+                type="button"
+                role="menuitem"
+                data-action="copy-comment-link"
+                {{on
+                  "click"
+                  (fn this.copyCommentLink this.selectedActionSheetComment)
+                }}
+              >
+                {{dIcon "link"}}
+                <span>{{i18n "video_shorts.comments.copy_link"}}</span>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                data-action="open-comment-topic"
+                {{on
+                  "click"
+                  (fn this.openCommentTopic this.selectedActionSheetComment)
+                }}
+              >
+                {{dIcon "up-right-from-square"}}
+                <span>{{i18n "video_shorts.comments.open_in_topic"}}</span>
+              </button>
+            {{/if}}
+
+            {{#if (this.canShowFlagAction this.selectedActionSheetComment)}}
+              <button
+                type="button"
+                role="menuitem"
+                data-action="flag-comment"
+                {{on "click" (fn this.flagComment this.selectedActionSheetComment)}}
+              >
+                {{dIcon "flag"}}
+                <span>{{i18n "video_shorts.comments.report"}}</span>
+              </button>
+            {{/if}}
+
+            {{#if (this.canShowDeleteAction this.selectedActionSheetComment)}}
+              <button
+                type="button"
+                role="menuitem"
+                class="danger"
+                data-action="delete-comment"
+                disabled={{eq
+                  this.deletingPostId
+                  (postKey this.selectedActionSheetComment)
+                }}
+                {{on
+                  "click"
+                  (fn this.deleteComment this.selectedActionSheetComment)
+                }}
+              >
+                {{dIcon "trash-can"}}
+                <span>{{i18n "video_shorts.comments.delete"}}</span>
+              </button>
+            {{/if}}
+          </div>
+        {{/if}}
       {{/if}}
 
       {{#if this.currentUser}}
+        {{#if this.commentReplyPostId}}
+          <button
+            type="button"
+            class="video-shorts-comments-surface__reply-dialog-backdrop"
+            aria-label={{i18n "video_shorts.comments.cancel"}}
+            {{on "click" this.cancelCommentReply}}
+          ></button>
+
         <div
-          class="video-shorts-comments-surface__reply"
-          data-video-shorts-youtube-composer
+          class="video-shorts-comments-surface__reply-dialog"
+          data-video-shorts-comment-reply-dialog
+          role="dialog"
+          aria-modal="false"
+          aria-label={{this.commentReplyDialogLabel}}
         >
           <form
             class="video-shorts-comments-surface__reply-form"
             {{on "submit" this.publishActiveReply}}
+            {{on "focusout" this.deactivateComposerOnFocusOut}}
           >
             <div class="video-shorts-comments-surface__composer-row">
               {{#if this.currentUserAvatarUrl}}
@@ -2327,57 +3281,61 @@ export default class VideoShortsCommentsSurface extends Component {
               {{/if}}
 
               <div class="video-shorts-comments-surface__composer-body">
-                {{#if this.commentReplyPostId}}
-                  {{#if this.commentReplyStatus}}
-                    <div
-                      class="video-shorts-comments-surface__comment-reply-status"
-                      data-video-shorts-comment-reply-status
+                {{#if this.commentReplyStatus}}
+                  <div
+                    class="video-shorts-comments-surface__comment-reply-status"
+                    data-video-shorts-comment-reply-status
+                  >
+                    <span data-video-shorts-reply-target>
+                      {{this.commentReplyStatus}}
+                    </span>
+                    <button
+                      type="button"
+                      data-action="cancel-comment-reply"
+                      aria-label={{i18n
+                        "video_shorts.comments.cancel_reply_to"
+                        username=this.selectedReplyUsernameLabel
+                      }}
+                      {{on "click" this.cancelCommentReply}}
                     >
-                      <span data-video-shorts-reply-target>
-                        {{this.commentReplyStatus}}
-                      </span>
-                      <button
-                        type="button"
-                        data-action="cancel-comment-reply"
-                        aria-label={{i18n
-                          "video_shorts.comments.cancel_reply_to"
-                          username=this.selectedReplyUsernameLabel
-                        }}
-                        {{on "click" this.cancelCommentReply}}
-                      >
-                        {{dIcon "xmark"}}
-                      </button>
-                    </div>
-                  {{/if}}
+                      {{dIcon "xmark"}}
+                    </button>
+                  </div>
+                {{/if}}
 
-                  <textarea
-                    data-video-shorts-comment-reply-input
-                    data-action="reply"
-                    value={{this.commentReplyText}}
-                    disabled={{this.commentReplySubmitting}}
-                    placeholder={{i18n "video_shorts.comments.reply"}}
-                    {{this.focusInput}}
-                    {{on "input" this.updateCommentReplyText}}
-                  ></textarea>
+                <textarea
+                  data-video-shorts-comment-reply-input
+                  data-action="reply"
+                  value={{this.commentReplyText}}
+                  disabled={{this.commentReplySubmitting}}
+                  placeholder={{this.commentReplyPlaceholder}}
+                  {{this.focusInput}}
+                  {{on "focus" this.focusCommentReplyInput}}
+                  {{on "input" this.updateCommentReplyText}}
+                ></textarea>
 
-                  {{#if this.commentReplyError}}
-                    <p
-                      class="video-shorts-comments-surface__comment-reply-error"
-                      role="alert"
-                    >
-                      {{this.commentReplyError}}
-                    </p>
-                  {{/if}}
+                {{#if this.commentReplyError}}
+                  <p
+                    class="video-shorts-comments-surface__comment-reply-error"
+                    role="alert"
+                  >
+                    {{this.commentReplyError}}
+                  </p>
+                {{/if}}
 
-                  {{#if this.commentReplyNotice}}
-                    <p
-                      class="video-shorts-comments-surface__comment-reply-notice"
-                    >
-                      {{this.commentReplyNotice}}
-                    </p>
-                  {{/if}}
+                {{#if this.commentReplyNotice}}
+                  <p
+                    class="video-shorts-comments-surface__comment-reply-notice"
+                  >
+                    {{this.commentReplyNotice}}
+                  </p>
+                {{/if}}
 
-                  <div class="video-shorts-comments-surface__form-actions">
+                {{#if this.commentReplyActionsVisible}}
+                  <div
+                    class="video-shorts-comments-surface__form-actions"
+                    data-video-shorts-comment-reply-actions
+                  >
                     <button
                       type="button"
                       class="btn-flat"
@@ -2399,51 +3357,12 @@ export default class VideoShortsCommentsSurface extends Component {
                       }}
                     </button>
                   </div>
-                {{else}}
-                  <textarea
-                    data-video-shorts-reply-input
-                    data-action="reply"
-                    value={{this.replyText}}
-                    disabled={{this.replySubmitting}}
-                    placeholder={{i18n "video_shorts.comments.reply"}}
-                    {{on "focus" this.openReply}}
-                    {{on "input" this.updateReplyText}}
-                  ></textarea>
-
-                  {{#if this.replyError}}
-                    <p
-                      class="video-shorts-comments-surface__reply-error"
-                      role="alert"
-                    >
-                      {{this.replyError}}
-                    </p>
-                  {{/if}}
-
-                  {{#if this.replyNotice}}
-                    <p class="video-shorts-comments-surface__reply-notice">
-                      {{this.replyNotice}}
-                    </p>
-                  {{/if}}
-
-                  <div class="video-shorts-comments-surface__form-actions">
-                    <button
-                      type="submit"
-                      class="btn btn-primary"
-                      data-action="publish-reply"
-                      disabled={{this.replySubmitting}}
-                    >
-                      {{if
-                        this.replySubmitting
-                        (i18n "video_shorts.comments.publishing")
-                        (i18n "video_shorts.comments.publish")
-                      }}
-                    </button>
-                  </div>
                 {{/if}}
               </div>
             </div>
           </form>
         </div>
+        {{/if}}
       {{/if}}
     </div>
   </template>

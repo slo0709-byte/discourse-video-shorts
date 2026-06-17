@@ -5,7 +5,7 @@ import pretender, {
 } from "discourse/tests/helpers/create-pretender";
 import { acceptance } from "discourse/tests/helpers/qunit-helpers";
 
-function feedItem(id, title) {
+function feedItem(id, title, attrs = {}) {
   return {
     topic_id: id,
     post_id: id,
@@ -41,6 +41,7 @@ function feedItem(id, title) {
       video_url: `/uploads/default/original/1X/video-${id}.mp4`,
       upload_id: id,
     },
+    ...attrs,
   };
 }
 
@@ -60,6 +61,7 @@ function commentPost(id, attrs = {}) {
     can_delete: Boolean(attrs.can_delete),
     can_flag: Boolean(attrs.can_flag),
     post_url: attrs.post_url,
+    reply_to_post_number: attrs.reply_to_post_number || null,
     reply_to_username: attrs.reply_to_username || null,
   };
 }
@@ -86,6 +88,13 @@ acceptance("Video Shorts in-context reply publishing", function (needs) {
         502: feedItem(502, "Inline comment reply clip"),
         504: feedItem(504, "Inline floor reply clip"),
         505: feedItem(505, "Inline deep floor reply clip"),
+        506: feedItem(506, "Collapsed branch reply clip", {
+          counts: {
+            like_count: 0,
+            reply_count: 4,
+            bookmark_count: 0,
+          },
+        }),
       };
       const replies = {
         501: [],
@@ -113,6 +122,7 @@ acceptance("Video Shorts in-context reply publishing", function (needs) {
             post_number: 3,
             cooked: "<p>Child floor comment</p>",
             raw: "Child floor comment",
+            reply_to_post_number: 2,
             reply_to_username: "parent-author",
           }),
         ],
@@ -130,16 +140,53 @@ acceptance("Video Shorts in-context reply publishing", function (needs) {
             cooked: "<p>Deep child comment</p>",
             raw: "Deep child comment",
             reply_count: 1,
+            reply_to_post_number: 2,
             reply_to_username: "deep-parent-author",
           }),
-        ],
-        715: [
           commentPost(725, {
             username: "deep-grandchild-author",
             post_number: 4,
             cooked: "<p>Deep grandchild comment</p>",
             raw: "Deep grandchild comment",
+            reply_to_post_number: 3,
             reply_to_username: "deep-child-author",
+          }),
+        ],
+        715: [],
+        506: [
+          commentPost(806, {
+            username: "collapsed-parent-author",
+            post_number: 2,
+            cooked: "<p>Collapsed parent</p>",
+            raw: "Collapsed parent",
+            reply_count: 1,
+          }),
+          commentPost(807, {
+            username: "unrelated-parent-author",
+            post_number: 4,
+            cooked: "<p>Unrelated collapsed parent</p>",
+            raw: "Unrelated collapsed parent",
+            reply_count: 1,
+          }),
+        ],
+        806: [
+          commentPost(816, {
+            username: "existing-child-author",
+            post_number: 3,
+            cooked: "<p>Existing collapsed child</p>",
+            raw: "Existing collapsed child",
+            reply_to_post_number: 2,
+            reply_to_username: "collapsed-parent-author",
+          }),
+        ],
+        807: [
+          commentPost(817, {
+            username: "unrelated-child-author",
+            post_number: 5,
+            cooked: "<p>Unrelated child stays collapsed</p>",
+            raw: "Unrelated child stays collapsed",
+            reply_to_post_number: 4,
+            reply_to_username: "unrelated-parent-author",
           }),
         ],
       };
@@ -197,6 +244,19 @@ acceptance("Video Shorts in-context reply publishing", function (needs) {
           );
         }
 
+        if (params.get("topic_id") === "506") {
+          return helper.response(
+            commentPost(826, {
+              username: "admin_user",
+              post_number: 6,
+              cooked: "<p>Collapsed branch child</p>",
+              raw: "Collapsed branch child",
+              reply_to_post_number: 2,
+              reply_to_username: "collapsed-parent-author",
+            }),
+          );
+        }
+
         return helper.response(
           commentPost(914, {
             username: "admin_user",
@@ -231,10 +291,15 @@ acceptance("Video Shorts in-context reply publishing", function (needs) {
     assert
       .dom('.video-shorts-comments-surface__comment[data-post-id="901"]')
       .includesText("Inline top reply");
+    assert
+      .dom(
+        '.video-shorts-comments-surface__comment[data-post-id="901"] [data-video-shorts-reply-target]',
+      )
+      .doesNotExist("direct video replies do not render an @username marker");
     assert.dom("#reply-control.open").doesNotExist();
     assert.dom(".d-editor").doesNotExist();
     assert.dom(".post-action-menu").doesNotExist();
-    assert.dom("[data-action='publish-reply']").exists();
+    assert.dom("[data-action='publish-reply']").doesNotExist();
     assert.dom(".video-shorts-comments-sheet").exists();
   });
 
@@ -249,10 +314,25 @@ acceptance("Video Shorts in-context reply publishing", function (needs) {
     await click('[data-post-id="602"] [data-action="reply-to-comment"]');
     assert
       .dom("[data-video-shorts-comment-reply-status]")
-      .includesText("Replying to comment-author");
+      .includesText("Replying to @comment-author");
     assert
       .dom('[data-post-id="602"] [data-video-shorts-reply-target]')
-      .includesText("comment-author");
+      .includesText("@comment-author");
+    assert
+      .dom("[data-video-shorts-comment-reply-input]")
+      .hasAttribute(
+        "placeholder",
+        "Reply to @comment-author",
+        "first-level comment replies show the @username target in the composer",
+      );
+    assert
+      .dom("[data-video-shorts-comment-reply-dialog]")
+      .exists("comment replies open the centered reply dialog");
+    assert
+      .dom(
+        ".video-shorts-comments-surface__reply [data-video-shorts-comment-reply-input]",
+      )
+      .doesNotExist("comment replies do not use the sticky bottom composer");
 
     await fillIn("[data-video-shorts-comment-reply-input]", "Inline child");
     await click("[data-action='publish-comment-reply']");
@@ -273,6 +353,15 @@ acceptance("Video Shorts in-context reply publishing", function (needs) {
       )
       .includesText("Inline child");
     assert
+      .dom('[data-post-id="902"] [data-video-shorts-reply-target]')
+      .hasText(
+        "@comment-author",
+        "first-level comment replies render a video-only plain-text @username prefix",
+      );
+    assert
+      .dom('[data-post-id="902"] [data-video-shorts-reply-target] a')
+      .doesNotExist("the video-only @username prefix is not a link");
+    assert
       .dom(
         '.video-shorts-comments-surface__comment[data-post-id="603"] .video-shorts-comments-surface__child-comment[data-post-id="902"]',
       )
@@ -281,7 +370,7 @@ acceptance("Video Shorts in-context reply publishing", function (needs) {
     assert.dom(".d-editor").doesNotExist();
     assert.dom(".post-action-menu").doesNotExist();
     assert.dom(".video-shorts-comments-sheet").exists();
-    assert.dom("[data-action='publish-reply']").exists();
+    assert.dom("[data-action='publish-reply']").doesNotExist();
   });
 
   test("floor reply targets the selected child without synthesizing a mention", async function (assert) {
@@ -290,10 +379,11 @@ acceptance("Video Shorts in-context reply publishing", function (needs) {
 
     await visit("/videos");
     await click('[data-action="open-comments"]');
+    await click('[data-post-id="604"] [data-video-shorts-view-replies]');
 
     assert
       .dom('[data-post-id="614"] [data-video-shorts-reply-target]')
-      .doesNotExist();
+      .hasText("@parent-author");
 
     await click('[data-post-id="614"] [data-action="reply-to-comment"]');
     assert
@@ -303,10 +393,23 @@ acceptance("Video Shorts in-context reply publishing", function (needs) {
       .dom('[data-post-id="614"] [data-video-shorts-reply-target]')
       .includesText("@child-author");
     assert
+      .dom("[data-video-shorts-comment-reply-dialog]")
+      .exists("floor replies open the centered reply dialog");
+    assert
       .dom(
         ".video-shorts-comments-surface__reply [data-video-shorts-comment-reply-input]",
       )
-      .isVisible("floor replies keep the sticky input composer visible");
+      .doesNotExist("floor replies do not use the sticky bottom composer");
+    assert
+      .dom("[data-video-shorts-comment-reply-input]")
+      .hasAttribute(
+        "placeholder",
+        "Reply to @child-author",
+        "floor replies show the @username target in the visible composer",
+      );
+    assert
+      .dom("[data-video-shorts-comment-reply-actions]")
+      .exists("floor replies immediately show the composer actions");
     assert
       .dom('[data-post-id="614"] [data-video-shorts-comment-reply-input]')
       .doesNotExist("floor replies do not render a clipped inline input");
@@ -323,21 +426,32 @@ acceptance("Video Shorts in-context reply publishing", function (needs) {
     assert.strictEqual(postRequests[0].get("reply_to_post_number"), "3");
     assert.false(
       postRequests[0].get("raw").startsWith("@child-author"),
-      "floor replies rely on Discourse reply_to_post_number instead of a generated mention",
+      "floor replies rely on Discourse reply_to_post_number instead of a generated @username",
     );
     assert
       .dom(
         '.video-shorts-comments-surface__child-comment[data-post-id="614"] .video-shorts-comments-surface__child-comment[data-post-id="914"]',
       )
-      .includesText("Already mentioned");
+      .doesNotExist("floor replies do not render as a third visual level");
     assert
       .dom(
         '.video-shorts-comments-surface__comment[data-post-id="604"] > .video-shorts-comments-surface__comment-card > .video-shorts-comments-surface__comment-main > .video-shorts-comments-surface__child-list > .video-shorts-comments-surface__child-comment[data-post-id="914"]',
       )
-      .doesNotExist();
+      .includesText("Already mentioned");
     assert
       .dom('[data-post-id="914"] [data-video-shorts-reply-target]')
-      .doesNotExist();
+      .hasText(
+        "@child-author",
+        "floor replies render a video-only plain-text @username prefix",
+      );
+    assert
+      .dom('[data-post-id="914"] [data-video-shorts-reply-target] a')
+      .doesNotExist("the video-only @username prefix is not a link");
+    assert
+      .dom(
+        '[data-post-id="914"] [data-video-shorts-reply-target] [data-user-card]',
+      )
+      .doesNotExist("the video-only @username prefix does not open user cards");
     assert.dom("#reply-control.open").doesNotExist();
     assert.dom(".d-editor").doesNotExist();
     assert.dom(".post-action-menu").doesNotExist();
@@ -351,6 +465,7 @@ acceptance("Video Shorts in-context reply publishing", function (needs) {
     await visit("/videos");
     const beforeURL = currentURL();
     await click('[data-action="open-comments"]');
+    await click('[data-post-id="705"] [data-video-shorts-view-replies]');
 
     await click('[data-post-id="725"] [data-action="reply-to-comment"]');
     assert
@@ -359,6 +474,24 @@ acceptance("Video Shorts in-context reply publishing", function (needs) {
     assert
       .dom('[data-post-id="725"] [data-video-shorts-reply-target]')
       .includesText("@deep-grandchild-author");
+    assert
+      .dom("[data-video-shorts-comment-reply-dialog]")
+      .exists("deep floor replies open the centered reply dialog");
+    assert
+      .dom(
+        ".video-shorts-comments-surface__reply [data-video-shorts-comment-reply-input]",
+      )
+      .doesNotExist("deep floor replies do not use the sticky bottom composer");
+    assert
+      .dom("[data-video-shorts-comment-reply-input]")
+      .hasAttribute(
+        "placeholder",
+        "Reply to @deep-grandchild-author",
+        "deep floor replies show the @username target in the visible composer",
+      );
+    assert
+      .dom("[data-video-shorts-comment-reply-actions]")
+      .exists("deep floor replies immediately show the composer actions");
 
     await fillIn("[data-video-shorts-comment-reply-input]", "Deep floor reply");
     await click("[data-action='publish-comment-reply']");
@@ -372,15 +505,85 @@ acceptance("Video Shorts in-context reply publishing", function (needs) {
       .dom(
         '.video-shorts-comments-surface__child-comment[data-post-id="725"] .video-shorts-comments-surface__child-comment[data-post-id="925"]',
       )
-      .includesText("Deep floor reply");
+      .doesNotExist("deep replies do not render as a third visual level");
     assert
       .dom(
         '.video-shorts-comments-surface__comment[data-post-id="705"] > .video-shorts-comments-surface__comment-card > .video-shorts-comments-surface__comment-main > .video-shorts-comments-surface__child-list > .video-shorts-comments-surface__child-comment[data-post-id="925"]',
       )
-      .doesNotExist();
+      .includesText("Deep floor reply");
+    assert
+      .dom('[data-post-id="925"] [data-video-shorts-reply-target]')
+      .hasText(
+        "@deep-grandchild-author",
+        "deep floor replies render a video-only plain-text @username prefix",
+      );
+    assert
+      .dom('[data-post-id="925"] [data-video-shorts-reply-target] a')
+      .doesNotExist("the video-only @username prefix is not a link");
+    assert
+      .dom(
+        '[data-post-id="925"] [data-video-shorts-reply-target] [data-user-card]',
+      )
+      .doesNotExist("the video-only @username prefix does not open user cards");
     assert.dom("#reply-control.open").doesNotExist();
     assert.dom(".d-editor").doesNotExist();
     assert.dom(".post-action-menu").doesNotExist();
     assert.dom(".video-shorts-comments-sheet").exists();
+  });
+
+  test("replying to a collapsed branch refreshes only that branch without synthesizing a mention", async function (assert) {
+    currentTopicId = 506;
+    postRequests = [];
+
+    await visit("/videos");
+    const beforeURL = currentURL();
+
+    await click('[data-action="open-comments"]');
+
+    assert
+      .dom('.video-shorts-comments-surface__child-comment[data-post-id="816"]')
+      .doesNotExist("existing child starts collapsed");
+    assert
+      .dom('.video-shorts-comments-surface__child-comment[data-post-id="817"]')
+      .doesNotExist("unrelated child starts collapsed");
+
+    await click('[data-post-id="806"] [data-action="reply-to-comment"]');
+    await fillIn(
+      "[data-video-shorts-comment-reply-input]",
+      "Collapsed branch child",
+    );
+    await click("[data-action='publish-comment-reply']");
+
+    assert.strictEqual(postRequests.length, 1);
+    assert.strictEqual(postRequests[0].get("topic_id"), "506");
+    assert.strictEqual(postRequests[0].get("raw"), "Collapsed branch child");
+    assert.strictEqual(postRequests[0].get("reply_to_post_number"), "2");
+    assert.false(
+      postRequests[0].get("raw").startsWith("@collapsed-parent-author"),
+      "collapsed branch replies rely on reply_to_post_number instead of generated @username text",
+    );
+    assert.strictEqual(currentURL(), beforeURL);
+    assert
+      .dom(
+        '.video-shorts-comments-surface__comment[data-post-id="806"] .video-shorts-comments-surface__child-comment[data-post-id="816"]',
+      )
+      .includesText("Existing collapsed child");
+    assert
+      .dom(
+        '.video-shorts-comments-surface__comment[data-post-id="806"] .video-shorts-comments-surface__child-comment[data-post-id="826"]',
+      )
+      .includesText("Collapsed branch child");
+    assert
+      .dom('.video-shorts-comments-surface__child-comment[data-post-id="817"]')
+      .doesNotExist("unrelated collapsed branch remains unloaded");
+    assert
+      .dom('[data-post-id="807"] [data-video-shorts-view-replies]')
+      .exists("unrelated branch still exposes its collapsed control");
+    assert
+      .dom(
+        '[data-post-id="506"] [data-action="open-comments"] .video-shorts-action-rail__count',
+      )
+      .hasText("5", "rail count increments from the source count");
+    assert.dom(".d-modal__title").hasText("5 replies");
   });
 });
