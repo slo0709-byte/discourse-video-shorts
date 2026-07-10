@@ -22,9 +22,9 @@ RSpec.describe "Discourse video shorts feed" do
     post
   end
 
-  def make_text_post(category:, raw: "Plain text", created_at: Time.zone.now)
+  def make_text_post(category:, raw: "Plain text", cooked: nil, created_at: Time.zone.now)
     topic = Fabricate(:topic, category: category, title: "Text topic #{SecureRandom.hex(3)}")
-    Fabricate(:post, topic: topic, raw: raw, cooked: raw, created_at: created_at)
+    Fabricate(:post, topic: topic, raw: raw, cooked: cooked || raw, created_at: created_at)
   end
 
   def direct_reply(parent, raw:)
@@ -92,7 +92,7 @@ RSpec.describe "Discourse video shorts feed" do
     )
   end
 
-  it "serializes OP video replies as visible topic comments" do
+  it "serializes OP video replies as visible descendant comments" do
     category = Fabricate(:category)
     video_post = create_post(category: category, raw: "Native video with discussion")
     upload = Fabricate(:video_upload, extension: "mp4", original_filename: "clip.mp4")
@@ -101,9 +101,16 @@ RSpec.describe "Discourse video shorts feed" do
     direct_reply(video_post, raw: "Second direct reply with enough detail")
     nested_reply = direct_reply(first_direct_reply, raw: "Nested reply with enough detail")
     direct_reply(nested_reply, raw: "Floor reply with enough detail")
+    Fabricate(
+      :post,
+      topic: video_post.topic,
+      raw: "Same topic but not in this video reply tree",
+      cooked: "<p>Same topic but not in this video reply tree</p>",
+    )
     SiteSetting.video_shorts_source_category_ids = category.id.to_s
 
-    direct_reply_count = video_post.reload.reply_count
+    direct_reply_count = PostReply.where(post: video_post).count
+    visible_descendant_count = 4
     visible_topic_comment_count = video_post.topic.reload.posts_count - 1
 
     get "/videos.json"
@@ -112,8 +119,8 @@ RSpec.describe "Discourse video shorts feed" do
     expect(response.status).to eq(200)
     expect(item).to be_present
     expect(direct_reply_count).to eq(2)
-    expect(direct_reply_count).to be < visible_topic_comment_count
-    expect(item["counts"]["reply_count"]).to eq(visible_topic_comment_count)
+    expect(visible_descendant_count).to be < visible_topic_comment_count
+    expect(item["counts"]["reply_count"]).to eq(visible_descendant_count)
   end
 
   it "excludes hidden OP video comments from the feed reply count" do
@@ -151,7 +158,7 @@ RSpec.describe "Discourse video shorts feed" do
     floor_reply = direct_reply(nested_reply, raw: "Floor reply to the nested reply")
     SiteSetting.video_shorts_source_category_ids = category.id.to_s
 
-    direct_reply_count = video_post.reload.reply_count
+    direct_reply_count = PostReply.where(post: video_post).count
     visible_descendant_count = [
       first_direct_reply,
       second_direct_reply,

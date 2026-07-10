@@ -157,14 +157,8 @@ module DiscourseVideoShorts
     end
 
     def visible_reply_count(post)
-      visible_replies =
-        if post.post_number == 1
-          Post.where(topic_id: post.topic_id).where.not(post_number: post.post_number)
-        else
-          Post.where(id: descendant_reply_ids(post))
-        end
-
-      visible_replies
+      Post
+        .where(id: descendant_reply_ids(post))
         .secured(guardian)
         .where(post_type: Post.types[:regular], deleted_at: nil, hidden: false)
         .count

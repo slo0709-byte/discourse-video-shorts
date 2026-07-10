@@ -1456,7 +1456,7 @@ acceptance("Video Shorts refined mobile route shell", function (needs) {
     );
   });
 
-  test("mobile readability is scoped to the video stage instead of a full-page overlay", function (assert) {
+  test("mobile readability does not use a full-page or stage scrim overlay", function (assert) {
     const playerRules = mobileRuleTextsFor((selectorText) =>
       selectorText
         .split(",")
@@ -1525,13 +1525,10 @@ acceptance("Video Shorts refined mobile route shell", function (needs) {
       ),
       "mobile metadata is stage-aligned instead of positioned against the full viewport",
     );
-    assert.true(
-      stageScrimRules.some(
-        (cssText) =>
-          cssText.includes("linear-gradient") &&
-          cssText.includes("pointer-events: none"),
-      ),
-      "mobile readability scrim is confined to the video stage",
+    assert.strictEqual(
+      stageScrimRules.length,
+      0,
+      "mobile readability avoids a stage scrim so controls and text are not darkened",
     );
     assert.true(
       routePlayerRules.some((cssText) => cssText.includes("height: 100%")),
