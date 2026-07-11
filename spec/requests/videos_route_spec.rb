@@ -14,10 +14,16 @@ RSpec.describe "Discourse video shorts scaffold" do
 
       expect(response.status).to eq(200)
       expect(response.media_type).to eq("application/json")
-      expect(response.parsed_body).to eq(
+      expect(response.parsed_body).to match(
+        "schema_version" => 1,
+        "feed_revision" => a_string_matching(/\A[a-f0-9]{64}\z/),
         "items" => [],
         "next_cursor" => nil,
-        "scan_limit_reached" => false,
+        "scan" => {
+          "candidates_scanned" => 0,
+          "scan_limit_reached" => false,
+          "end_reached" => true,
+        },
       )
     end
 
@@ -26,10 +32,16 @@ RSpec.describe "Discourse video shorts scaffold" do
 
       expect(response.status).to eq(200)
       expect(response.media_type).to eq("application/json")
-      expect(response.parsed_body).to eq(
+      expect(response.parsed_body).to match(
+        "schema_version" => 1,
+        "feed_revision" => a_string_matching(/\A[a-f0-9]{64}\z/),
         "items" => [],
         "next_cursor" => nil,
-        "scan_limit_reached" => false,
+        "scan" => {
+          "candidates_scanned" => 0,
+          "scan_limit_reached" => false,
+          "end_reached" => true,
+        },
       )
     end
   end
@@ -47,7 +59,7 @@ RSpec.describe "Discourse video shorts scaffold" do
 
       expect(response.status).to eq(404)
       expect(response.media_type).to eq("application/json")
-      expect(response.parsed_body).to eq("errors" => [I18n.t("not_found")])
+      expect(response.parsed_body).to eq("error" => "not_found")
     end
   end
 end

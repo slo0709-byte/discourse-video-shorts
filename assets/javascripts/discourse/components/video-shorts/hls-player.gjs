@@ -5,161 +5,179 @@ import { action } from "@ember/object";
 import didInsert from "@ember/render-modifiers/modifiers/did-insert";
 import didUpdate from "@ember/render-modifiers/modifiers/did-update";
 import willDestroy from "@ember/render-modifiers/modifiers/will-destroy";
+import { service } from "@ember/service";
+import { i18n } from "discourse-i18n";
+import { VideoShortsMediaLoader } from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-media-loader";
 
 const HLS_SCRIPT_ID = "video-shorts-hls-js";
 const HLS_SCRIPT_SRC = "/plugins/discourse-video-shorts/javascripts/hls.min.js";
-const HLS_MIME_TYPE = "application/vnd.apple.mpegurl";
-
-let hlsScriptPromise = null;
+let hlsScriptPromise;
 
 function loadHlsScript() {
   if (window.Hls) {
     return Promise.resolve(window.Hls);
   }
 
-  if (hlsScriptPromise) {
-    return hlsScriptPromise;
-  }
+  hlsScriptPromise ||= new Promise((resolve, reject) => {
+    let script = document.getElementById(HLS_SCRIPT_ID);
+    if (script) {
+      script.remove();
+      script = null;
+    }
+    let created = false;
 
-  hlsScriptPromise = new Promise((resolve, reject) => {
-    let existingScript = document.getElementById(HLS_SCRIPT_ID);
-
-    if (existingScript) {
-      existingScript.addEventListener("load", () => resolve(window.Hls), { once: true });
-      existingScript.addEventListener("error", reject, { once: true });
-      return;
+    if (!script) {
+      script = document.createElement("script");
+      script.id = HLS_SCRIPT_ID;
+      script.src = HLS_SCRIPT_SRC;
+      script.async = true;
+      created = true;
     }
 
-    let script = document.createElement("script");
-    script.id = HLS_SCRIPT_ID;
-    script.src = HLS_SCRIPT_SRC;
-    script.async = true;
-    script.onload = () => {
-      script.dataset.loaded = "true";
-      resolve(window.Hls);
-    };
-    script.onerror = (error) => {
-      hlsScriptPromise = null;
-      script.remove();
-      reject(error);
-    };
-    document.head.appendChild(script);
-  });
+    script.addEventListener(
+      "load",
+      () => {
+        if (window.Hls) {
+          resolve(window.Hls);
+        } else {
+          reject(new Error("video_shorts_hls_unavailable"));
+        }
+      },
+      { once: true }
+    );
+    script.addEventListener(
+      "error",
+      () => reject(new Error("video_shorts_hls_unavailable")),
+      { once: true }
+    );
 
+    if (created) {
+      document.head.appendChild(script);
+    }
+  }).catch((error) => {
+    hlsScriptPromise = null;
+    throw error;
+  });
   return hlsScriptPromise;
 }
 
 export default class VideoShortsHlsPlayer extends Component {
+  @service("video-shorts-policy") policy;
+
   @tracked playBlocked = false;
   @tracked loadError = false;
 
   hls = null;
-  loadToken = 0;
   video = null;
-  videoErrorHandler = null;
+  mediaLoader = null;
+  releaseResource = null;
+  unregisterPolicy = null;
+  unregisterPlayback = null;
+  playbackRegistered = false;
+  loadToken = 0;
+  playbackOwner = {
+    pause: () => this.pause(),
+    suspend: () => this.suspend(),
+    resume: () => this.resume(),
+    destroy: () => this.teardown(),
+  };
 
   get hlsUrl() {
-    return this.args.item?.media?.hls_url;
+    return this.args.item?.media?.url;
+  }
+
+  get policyRevision() {
+    return this.args.item?.media?.policy_revision;
+  }
+
+  get routeSessionOwner() {
+    return this.args.routeSessionOwner;
   }
 
   @action
-  syncPlayback(video) {
+  async syncPlayback(video) {
     this.video = video;
     video.muted = true;
 
-    if (!this.args.isActive) {
-      this.pause();
-      return;
+    if (!this.hls && !this.loadError && (this.args.isActive || this.args.shouldPreload)) {
+      await this.attachHls();
     }
 
-    this.attachHls(video);
+    if (this.args.isActive) {
+      this.play();
+    } else {
+      this.pause();
+    }
   }
 
   @action
-  async attachHls(video) {
-    let hlsUrl = this.hlsUrl;
-    let loadToken = (this.loadToken += 1);
-    let nativeHlsSupported = Boolean(video.canPlayType(HLS_MIME_TYPE));
-
-    this.destroyHls();
-    this.clearVideoErrorHandler();
+  async attachHls() {
+    let token = ++this.loadToken;
+    this.destroyMedia();
     this.loadError = false;
 
-    if (!hlsUrl) {
+    if (!this.hlsUrl || !Number.isInteger(this.policyRevision)) {
       this.loadError = true;
       return;
     }
+    this.registerPlayback();
 
     try {
+      let snapshot = await this.policy.revalidate();
+      if (token !== this.loadToken) {
+        return;
+      }
+      if (
+        snapshot.revision !== this.policyRevision ||
+        !this.policy.authorize(this.hlsUrl, snapshot.revision)
+      ) {
+        this.failLoad();
+        return;
+      }
+
+      this.releaseResource = this.routeSessionOwner?.retainExternalResource?.() || this.policy.retainExternalResource();
+      this.mediaLoader = new VideoShortsMediaLoader({
+        policy: this.policy,
+        revision: snapshot.revision,
+      });
+      this.unregisterPolicy = this.policy.onRevisionChange(() => this.invalidatePolicy());
+
       let Hls = await loadHlsScript();
-
-      if (loadToken !== this.loadToken || !video.isConnected) {
+      if (token !== this.loadToken) {
+        return;
+      }
+      if (!this.video?.isConnected || !Hls?.isSupported?.()) {
+        this.failLoad();
         return;
       }
 
-      if (Hls?.isSupported?.()) {
-        this.attachHlsJs(Hls, video, hlsUrl, loadToken);
-        return;
-      }
+      this.hls = new Hls({
+        debug: false,
+        maxBufferHole: 0.5,
+        loader: this.mediaLoader.createHlsLoader(),
+      });
+      this.hls.on?.(Hls.Events?.MANIFEST_PARSED, () => {
+        if (token === this.loadToken && this.args.isActive) {
+          this.play();
+        }
+      });
+      this.hls.on?.(Hls.Events?.ERROR, (_event, data) => {
+        if (token === this.loadToken && data?.fatal) {
+          this.failLoad();
+        }
+      });
+      this.hls.loadSource(this.hlsUrl);
+      this.hls.attachMedia(this.video);
     } catch {
-      // Fall through to native playback when the local hls.js asset is unavailable.
-    }
-
-    if (nativeHlsSupported) {
-      this.attachNativeHls(video, hlsUrl, loadToken);
-      return;
-    }
-
-    if (loadToken === this.loadToken) {
-      this.loadError = true;
-    }
-  }
-
-  attachHlsJs(Hls, video, hlsUrl, loadToken) {
-    let hls = new Hls({ debug: false, maxBufferHole: 0.5 });
-    let manifestParsedEvent = Hls.Events?.MANIFEST_PARSED || "hlsManifestParsed";
-    let errorEvent = Hls.Events?.ERROR || "hlsError";
-
-    this.hls = hls;
-    this.attachVideoErrorHandler(video, loadToken);
-
-    hls.on?.(manifestParsedEvent, () => {
-      if (loadToken === this.loadToken && this.hls === hls) {
-        this.play();
+      if (token === this.loadToken) {
+        this.failLoad();
       }
-    });
-
-    hls.on?.(errorEvent, (_event, data) => {
-      if (loadToken !== this.loadToken || this.hls !== hls || !data?.fatal) {
-        return;
-      }
-
-      this.loadError = true;
-      this.playBlocked = false;
-      this.destroyHls();
-    });
-
-    hls.loadSource(hlsUrl);
-    hls.attachMedia(video);
-
-    if (typeof hls.on !== "function") {
-      this.play();
     }
-  }
-
-  attachNativeHls(video, hlsUrl, loadToken) {
-    this.attachVideoErrorHandler(video, loadToken);
-    video.src = hlsUrl;
-    this.play();
   }
 
   @action
   play() {
-    this.video?.play()?.then(() => {
-      this.playBlocked = false;
-    }).catch(() => {
-      this.playBlocked = true;
-    });
+    this.video?.play()?.then(() => (this.playBlocked = false)).catch(() => (this.playBlocked = true));
   }
 
   @action
@@ -168,69 +186,72 @@ export default class VideoShortsHlsPlayer extends Component {
     this.playBlocked = false;
   }
 
-  @action
-  teardown() {
+  registerPlayback() {
+    if (this.playbackRegistered) {
+      return;
+    }
+    this.unregisterPlayback =
+      this.routeSessionOwner?.registerPlayback?.(this.playbackOwner) || null;
+    this.playbackRegistered = true;
+  }
+
+  suspend() {
     this.loadToken += 1;
-    this.destroyHls();
-    this.clearVideoErrorHandler();
+    this.destroyMedia();
     this.pause();
+    if (this.video) {
+      this.video.removeAttribute("src");
+      this.video.load();
+    }
+  }
+
+  resume() {
+    if (!this.loadError && (this.args.isActive || this.args.shouldPreload)) {
+      this.attachHls();
+    }
+  }
+
+  failLoad() {
+    this.playbackOwner.destroy();
+    this.loadError = true;
+  }
+
+  invalidatePolicy() {
+    this.loadError = true;
+    this.destroy();
+  }
+
+  destroyMedia() {
+    this.hls?.destroy?.();
+    this.hls = null;
+    this.mediaLoader?.destroy();
+    this.mediaLoader = null;
+    this.unregisterPolicy?.();
+    this.unregisterPolicy = null;
+    this.releaseResource?.();
+    this.releaseResource = null;
+  }
+
+  @action
+  destroy() {
+    this.playbackOwner.destroy();
+  }
+
+  teardown() {
+    this.suspend();
+    this.unregisterPlayback?.();
+    this.unregisterPlayback = null;
+    this.playbackRegistered = false;
     this.video = null;
   }
 
-  destroyHls() {
-    this.hls?.destroy?.();
-    this.hls = null;
-  }
-
-  attachVideoErrorHandler(video, loadToken) {
-    this.clearVideoErrorHandler();
-
-    this.videoErrorHandler = () => {
-      if (loadToken !== this.loadToken) {
-        return;
-      }
-
-      this.loadError = true;
-      this.playBlocked = false;
-    };
-
-    video.addEventListener("error", this.videoErrorHandler, { once: true });
-  }
-
-  clearVideoErrorHandler() {
-    if (this.video && this.videoErrorHandler) {
-      this.video.removeEventListener("error", this.videoErrorHandler);
-    }
-
-    this.videoErrorHandler = null;
-  }
-
   <template>
-    <div class="video-shorts-hls-player" {{willDestroy this.teardown}}>
-      <video
-        class="video-shorts-hls-player__video"
-        data-hls-url={{this.hlsUrl}}
-        preload={{if @shouldPreload "metadata" "none"}}
-        muted
-        playsinline
-        loop
-        controls
-        {{didInsert this.syncPlayback}}
-        {{didUpdate this.syncPlayback @isActive}}
-      ></video>
-
+    <div class="video-shorts-hls-player" {{willDestroy this.destroy}}>
+      <video class="video-shorts-hls-player__video" preload={{if @shouldPreload "metadata" "none"}} muted playsinline loop controls {{didInsert this.syncPlayback}} {{didUpdate this.syncPlayback @isActive @shouldPreload}}></video>
       {{#if this.loadError}}
-        <a class="video-shorts-hls-player__fallback" href={{@item.post_url}}>
-          Open topic
-        </a>
+        <a class="video-shorts-hls-player__fallback" href={{@item.post_url}}>{{i18n "video_shorts.actions.open_topic"}}</a>
       {{else if this.playBlocked}}
-        <button
-          type="button"
-          class="video-shorts-hls-player__play"
-          {{on "click" this.play}}
-        >
-          Play
-        </button>
+        <button type="button" class="video-shorts-hls-player__play" {{on "click" this.play}}>{{i18n "video_shorts.actions.play"}}</button>
       {{/if}}
     </div>
   </template>

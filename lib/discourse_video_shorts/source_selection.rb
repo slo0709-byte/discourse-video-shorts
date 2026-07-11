@@ -23,6 +23,46 @@ module DiscourseVideoShorts
         :cursor_scope_digest,
       )
 
+    class << self
+      def canonical_source?(post)
+        return false unless SiteSetting.video_shorts_enabled
+        return false unless post&.post_type == Post.types[:regular]
+        return false if post.deleted_at.present? || post.hidden?
+
+        topic = post.topic
+        return false if topic.nil? || topic.deleted_at.present? || !topic.visible?
+        return false unless configured_source_topic?(topic)
+
+        source_guardian = Guardian.new(post.user)
+        return false unless source_guardian.can_see?(topic) && source_guardian.can_see?(post)
+
+        policy_snapshot = DiscourseVideoShorts::Policy::Snapshot.current
+        DiscourseVideoShorts::MediaExtractor.extract_media_for_visible_post(
+          post,
+          source_guardian,
+          policy_snapshot: policy_snapshot,
+        ).present?
+      end
+
+      private
+
+      def configured_source_topic?(topic)
+        category_ids =
+          SiteSetting.video_shorts_source_category_ids.to_s.split("|").filter_map do |value|
+            Integer(value.strip, exception: false)
+          end
+        return true if category_ids.include?(topic.category_id)
+
+        return false unless SiteSetting.tagging_enabled
+
+        tag_names =
+          SiteSetting.video_shorts_source_tag_names.to_s.split("|").filter_map do |value|
+            value.strip.downcase.presence
+          end
+        tag_names.present? && topic.tags.any? { |tag| tag_names.include?(tag.name.downcase) }
+      end
+    end
+
     def initialize(guardian:, page_size: nil, candidate_scan_limit: nil)
       @guardian = guardian
       @requested_page_size = page_size
@@ -39,11 +79,7 @@ module DiscourseVideoShorts
           category_ids: category_sources.effective_ids,
           tag_names: tag_sources.effective_names,
         )
-      cursor_digest_input =
-        source_scope_digest_input(
-          category_ids: category_sources.configured_ids,
-          tag_names: tag_sources.configured_names,
-        )
+      cursor_digest_input = digest_input
 
       Result.new(
         posts: posts,
@@ -199,12 +235,12 @@ module DiscourseVideoShorts
 
     def resolved_page_size
       value = requested_page_size.presence || SiteSetting.video_shorts_page_size
-      clamp_integer(value, min: 1, max: 50)
+      clamp_integer(value, min: 1, max: 20)
     end
 
     def resolved_candidate_scan_limit
       value = requested_candidate_scan_limit.presence || SiteSetting.video_shorts_candidate_scan_limit
-      clamp_integer(value, min: 1, max: 1000)
+      clamp_integer(value, min: 1, max: 500)
     end
 
     def source_scope_digest_input(category_ids:, tag_names:)
@@ -238,6 +274,33 @@ module DiscourseVideoShorts
         stripped = item.strip.downcase
         stripped.presence
       end.uniq.sort
+    end
+  end
+
+  class Canary
+    class << self
+      def allowed?(guardian)
+        group_ids = configured_group_ids
+        return true if group_ids.blank?
+        return false if guardian.anonymous?
+        return true if guardian.is_staff?
+
+        guardian.user.groups.where(id: group_ids).exists?
+      end
+
+      def digest_for(_guardian)
+        Digest::SHA256.hexdigest(JSON.generate(group_ids: configured_group_ids))
+      end
+
+      private
+
+      def configured_group_ids
+        return [] unless SiteSetting.respond_to?(:video_shorts_canary_group_ids)
+
+        SiteSetting.video_shorts_canary_group_ids.to_s.split("|").filter_map do |value|
+          Integer(value.strip, exception: false)
+        end.uniq.sort
+      end
     end
   end
 end

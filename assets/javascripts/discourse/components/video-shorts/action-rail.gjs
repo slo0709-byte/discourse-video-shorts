@@ -8,16 +8,15 @@ import FlagModal from "discourse/components/modal/flag";
 import ShareTopicModal from "discourse/components/modal/share-topic";
 import { ajax } from "discourse/lib/ajax";
 import { popupAjaxError } from "discourse/lib/ajax-error";
-import { BookmarkFormData } from "discourse/lib/bookmark-form-data";
 import PostFlag from "discourse/lib/flag-targets/post-flag";
 import Composer from "discourse/models/composer";
+import Post from "discourse/models/post";
 import { not } from "discourse/truth-helpers";
 import dIcon from "discourse/ui-kit/helpers/d-icon";
 import { i18n } from "discourse-i18n";
 import VideoShortsCommentsSheet from "discourse/plugins/discourse-video-shorts/discourse/components/modal/video-shorts-comments-sheet";
 
 export default class VideoShortsActionRail extends Component {
-  @service bookmarkApi;
   @service composer;
   @service currentUser;
   @service modal;
@@ -26,7 +25,6 @@ export default class VideoShortsActionRail extends Component {
 
   @tracked liked = this.args.item?.actions?.liked || false;
   @tracked bookmarked = this.args.item?.actions?.bookmarked || false;
-  @tracked bookmarkId = this.args.item?.actions?.bookmark_id || null;
   @tracked likeCountValue = this.args.item?.counts?.like_count || 0;
   @tracked bookmarkCountValue = this.args.item?.counts?.bookmark_count || 0;
 
@@ -116,17 +114,21 @@ export default class VideoShortsActionRail extends Component {
     });
   }
 
-  get postRecord() {
+  postRecordFrom(data = {}) {
     return this.store.createRecord("post", {
+      ...data,
       id: this.args.item.post_id,
       post_number: this.args.item.post_number,
       username: this.args.item.username,
       topic_id: this.args.item.topic_id,
       topic_slug: this.args.item.topic_url?.split("/")[2],
       topic: this.topicRecord,
-      actions_summary: this.args.item.native_action_summary || [],
       hidden: false,
     });
+  }
+
+  get postRecord() {
+    return this.postRecordFrom();
   }
 
   showLogin() {
@@ -177,32 +179,18 @@ export default class VideoShortsActionRail extends Component {
       return;
     }
 
-    if (this.bookmarked && this.bookmarkId) {
-      try {
-        await ajax(`/bookmarks/${this.bookmarkId}.json`, {
-          method: "DELETE",
-        });
+    try {
+      if (this.bookmarked) {
+        await Post.destroyBookmark(this.args.item.post_id);
         this.bookmarked = false;
-        this.bookmarkId = null;
         this.bookmarkCountValue = Math.max(this.bookmarkCountValue - 1, 0);
-      } catch (error) {
-        popupAjaxError(error);
+      } else {
+        await Post.updateBookmark(this.args.item.post_id, true);
+        this.bookmarked = true;
+        this.bookmarkCountValue += 1;
       }
-
-      return;
-    }
-
-    const bookmark = this.bookmarkApi.buildNewBookmark(
-      "Post",
-      this.args.item.post_id
-    );
-    const formData = new BookmarkFormData(bookmark);
-    const saved = await this.bookmarkApi.create(formData);
-
-    if (saved) {
-      this.bookmarked = true;
-      this.bookmarkId = saved.id;
-      this.bookmarkCountValue += 1;
+    } catch (error) {
+      popupAjaxError(error);
     }
   }
 
@@ -262,7 +250,7 @@ export default class VideoShortsActionRail extends Component {
   }
 
   @action
-  flag() {
+  async flag() {
     if (!this.currentUser) {
       return this.showLogin();
     }
@@ -271,15 +259,20 @@ export default class VideoShortsActionRail extends Component {
       return;
     }
 
-    const post = this.postRecord;
+    try {
+      const postData = await ajax(`/posts/${this.args.item.post_id}.json`);
+      const post = this.postRecordFrom(postData);
 
-    this.modal.show(FlagModal, {
-      model: {
-        flagTarget: new PostFlag(),
-        flagModel: post,
-        setHidden: () => post.set("hidden", true),
-      },
-    });
+      this.modal.show(FlagModal, {
+        model: {
+          flagTarget: new PostFlag(),
+          flagModel: post,
+          setHidden: () => post.set("hidden", true),
+        },
+      });
+    } catch (error) {
+      popupAjaxError(error);
+    }
   }
 
   <template>

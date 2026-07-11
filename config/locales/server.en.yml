@@ -7,3 +7,4 @@ en:
     video_shorts_page_size: "Default page size for the video shorts feed."
     video_shorts_candidate_scan_limit: "Maximum post candidates scanned per video feed request. Keep this bounded; use object storage and a CDN for uploaded videos, and serve m3u8 playlists and segments from HTTPS CDN URLs where possible."
     video_shorts_debug_mode: "Show staff-only debug information for the video shorts feed."
+    video_shorts_canary_group_ids: "Groups allowed to access Video Shorts during a staged rollout. Leave empty for all eligible users."

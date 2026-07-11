@@ -29,8 +29,8 @@ RSpec.describe DiscourseVideoShorts::SourceSelection do
 
     result = resolve(page_size: 500, candidate_scan_limit: 5000)
 
-    expect(result.page_size).to eq(50)
-    expect(result.candidate_scan_limit).to eq(1000)
+    expect(result.page_size).to eq(20)
+    expect(result.candidate_scan_limit).to eq(500)
   end
 
   it "returns staff-only warnings for empty source settings" do

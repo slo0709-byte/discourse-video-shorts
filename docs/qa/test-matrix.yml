@@ -1,0 +1,157 @@
+schema_version: 1
+discourse:
+  tag: v2026.7.0-latest
+  commit: ded677e00beb0e9bae6e70b69582aecfb72b5477
+run_environment:
+  browser_provenance: [version, device, os, real-device, provenance-artifact]
+  production_equivalent:
+    - app-cpu-and-ram
+    - app-config
+    - database-cpu-and-ram
+    - database-config
+    - plugin-manifest
+    - cache-mode
+    - cache-config-artifact
+    - background-load-artifact
+browsers:
+  - id: desktop-chrome
+    surface: desktop
+    required: true
+    real_device: true
+  - id: desktop-edge
+    surface: desktop
+    required: true
+    real_device: true
+  - id: iphone-safari
+    surface: mobile
+    required: true
+    real_device: true
+  - id: android-chrome
+    surface: mobile
+    required: true
+    real_device: true
+media:
+  - id: bilibili
+    required: true
+  - id: youtube
+    required: true
+  - id: upload_mp4
+    required: true
+  - id: external_mp4_or_hls
+    required: true
+flows:
+  - id: feed-auto-pagination
+    obligations:
+      [
+        guardian-filtering,
+        keyset-order,
+        per-post-dedup,
+        identity-dedup,
+        no-load-more,
+      ]
+  - id: native-actions
+    obligations: [like, bookmark, reply, share, flag, open-topic]
+  - id: responsiveness
+    cold_start:
+      networks: [4g, wifi]
+      repeats_per_network: 10
+      max_p90_ms: 2000
+    thirty_switch:
+      repeats: 30
+      max_p90_ms: 500
+  - id: comments-realtime
+    repeats: 30
+    descendant_counts: [1, 201]
+    operations: [create, edit-first, edit-201st, delete-first, delete-201st]
+    max_p95_ms: 2000
+  - id: authorization-revocation
+    max_p95_ms: 6000
+    repeats: 30
+    obligations: [clear-sensitive-cache, disable-writes, close-comments]
+  - id: policy-revocation
+    repeats: 30
+    detection_max_p95_ms: 2000
+    post_observation_deleted_origin_requests: 0
+  - id: offline-recovery
+    obligations: [silent-backoff, reconnect-delta, expired-delta-reconciliation]
+  - id: lifecycle-a-b-a
+    obligations: [a-to-b-transition, b-to-a-transition, state-reconciliation]
+  - id: admin-diagnostics
+    obligations: [admin-only-access, diagnostics-visible, safe-artifact]
+  - id: rollback-old-new-old
+    obligations: [core-writes-preserved, new-jobs-zero, old-smoke-pass]
+    evidence:
+      [
+        discourse-commit,
+        old-plugin-revision,
+        new-plugin-revision,
+        executed-at,
+        operator,
+        raw-artifact,
+      ]
+visual:
+  max_diff_ratio: 0.005
+  pixel_threshold: 0.10
+  viewports:
+    - desktop-1440x900
+    - desktop-narrow
+    - iphone-portrait
+    - iphone-landscape
+    - android-portrait
+  themes: [light, dark]
+  combinations:
+    desktop-chrome:
+      viewports: [desktop-1440x900, desktop-narrow]
+      themes: [light, dark]
+    desktop-edge:
+      viewports: [desktop-1440x900, desktop-narrow]
+      themes: [light, dark]
+    iphone-safari:
+      viewports: [iphone-portrait, iphone-landscape]
+      themes: [light, dark]
+    android-chrome:
+      viewports: [android-portrait]
+      themes: [light, dark]
+  required_rows: 14
+  manual_blockers:
+    - text-clipping
+    - safe-area-overlap
+    - invisible-focus
+    - missing-error-exit
+    - multiple-visible-players
+critical_flows:
+  exact_once: [offline-recovery, lifecycle-a-b-a, admin-diagnostics, native-actions]
+performance:
+  data_gate:
+    candidates: 10000
+    seed: 20260710
+    rounds: 3
+    warmup_traversals: 5
+    warmup_seconds: 300
+    concurrency: 20
+    duration_seconds_per_round: 1800
+    background_load_percent: 70
+    completed_full_sequences_min: 30
+    raw_artifacts:
+      [benchmark-output, identity-manifest, environment-load, per-round-samples]
+  long_session:
+    switches: 1000
+    desktop_rounds_per_browser: 3
+    mobile_rounds_per_browser: 1
+    warmup_switches: 100
+    first_and_final_quarter_samples_min: 250
+    final_to_first_p95_ratio_max: 1.25
+    long_task_fraction_max: 0.05
+    heap_delta_mib_max: 30
+    media_instances_max: 3
+    feed_dom_items_max: 60
+    listener_delta_max: 5
+    subscription_delta_max: 5
+    audible_players_max: 1
+    late_mounts: 0
+release:
+  require_p0: 0
+  require_p1: 0
+  record_p2: true
+  record_p3: true
+  evidence_schema: docs/qa/evidence-schema.json

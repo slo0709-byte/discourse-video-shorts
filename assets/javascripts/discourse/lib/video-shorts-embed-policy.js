@@ -1,13 +1,11 @@
-const PROVIDER_HOSTS = {
+const EMBED_HOSTS = {
   bilibili: new Set(["player.bilibili.com"]),
   youtube: new Set(["www.youtube.com", "www.youtube-nocookie.com"]),
-  vimeo: new Set(["player.vimeo.com"]),
 };
 
-const PROVIDER_PATHS = {
+const EMBED_PATHS = {
   bilibili: (pathname) => pathname === "/player.html",
   youtube: (pathname) => pathname.startsWith("/embed/"),
-  vimeo: (pathname) => pathname.startsWith("/video/"),
 };
 
 export const VIDEO_SHORTS_IFRAME_ALLOW =
@@ -16,34 +14,36 @@ export const VIDEO_SHORTS_IFRAME_SANDBOX =
   "allow-scripts allow-same-origin allow-presentation";
 
 export function trustedVideoShortsIframe(media) {
-  if (
-    !media ||
-    media.renderability !== "iframe_candidate" ||
-    !media.embed_url
-  ) {
+  if (!media || typeof media.url !== "string") {
     return null;
   }
 
-  const allowedHosts = PROVIDER_HOSTS[media.provider];
+  const allowedHosts = EMBED_HOSTS[media.kind];
 
   if (!allowedHosts) {
     return null;
   }
 
   try {
-    const url = new URL(media.embed_url);
+    const url = new URL(media.url);
 
-    if (url.protocol !== "https:" || !allowedHosts.has(url.hostname)) {
+    if (
+      url.protocol !== "https:" ||
+      url.port ||
+      url.username ||
+      url.password ||
+      !allowedHosts.has(url.hostname)
+    ) {
       return null;
     }
 
-    if (!PROVIDER_PATHS[media.provider](url.pathname)) {
+    if (!EMBED_PATHS[media.kind](url.pathname)) {
       return null;
     }
 
     return {
       src: url.toString(),
-      title: `${media.provider} video embed`,
+      title: `${media.kind} video embed`,
       allow: VIDEO_SHORTS_IFRAME_ALLOW,
       sandbox: VIDEO_SHORTS_IFRAME_SANDBOX,
       referrerPolicy: "strict-origin-when-cross-origin",

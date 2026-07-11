@@ -8,6 +8,9 @@ import {
 import { test } from "qunit";
 import FlagModal from "discourse/components/modal/flag";
 import ShareTopicModal from "discourse/components/modal/share-topic";
+import pretender, {
+  pretenderHelpers,
+} from "discourse/tests/helpers/create-pretender";
 import { acceptance } from "discourse/tests/helpers/qunit-helpers";
 
 function youtubeItem() {
@@ -32,18 +35,18 @@ function youtubeItem() {
       liked: false,
       can_like: false,
       bookmarked: false,
-      bookmark_id: null,
       can_bookmark: false,
       can_flag: false,
       can_reply: false,
       share_url: "/t/youtube-short/101/1",
     },
-    native_action_summary: [],
     media: {
-      provider: "youtube",
-      renderability: "iframe_candidate",
-      embed_url: "https://www.youtube.com/embed/dQw4w9WgXcQ",
-      dedupe_key: "youtube:dQw4w9WgXcQ",
+      kind: "youtube",
+      identity: "v1:youtube:dQw4w9WgXcQ",
+      url: "https://www.youtube.com/embed/dQw4w9WgXcQ",
+      required_origins: [],
+      policy_revision: null,
+      fallback_reason: null,
     },
   };
 }
@@ -56,11 +59,12 @@ function bilibiliItem() {
     post_url: "/t/bilibili-short/102/1",
     title: "Bilibili short",
     media: {
-      provider: "bilibili",
-      renderability: "iframe_candidate",
-      embed_url:
-        "https://player.bilibili.com/player.html?bvid=BV1Q541167Qg&page=2",
-      dedupe_key: "bilibili:BV1Q541167Qg:page:2",
+      kind: "bilibili",
+      identity: "v1:bilibili:BV1Q541167Qg",
+      url: "https://player.bilibili.com/player.html?bvid=BV1Q541167Qg&page=1",
+      required_origins: [],
+      policy_revision: null,
+      fallback_reason: null,
     },
   };
 }
@@ -73,10 +77,12 @@ function nativeItem(index) {
     post_url: `/t/native-short/${200 + index}/1`,
     title: `Native short ${index}`,
     media: {
-      provider: "native",
-      renderability: "native",
-      video_url: `/uploads/short-${index}.mp4`,
-      dedupe_key: `native:upload:${index}`,
+      kind: "upload_mp4",
+      identity: `v1:upload:${index}:fixture`,
+      url: `/uploads/short-${index}.mp4`,
+      required_origins: [],
+      policy_revision: null,
+      fallback_reason: null,
     },
   };
 }
@@ -93,41 +99,93 @@ function actionableYoutubeItem() {
       can_flag: true,
       can_reply: true,
     },
-    native_action_summary: [
-      {
-        id: 2,
-        can_act: true,
-      },
-    ],
   };
 }
 
-function untrustedYoutubeItem() {
+function fallbackItem() {
   return {
     ...youtubeItem(),
     media: {
-      provider: "youtube",
-      renderability: "iframe_candidate",
-      embed_url: "https://example.com/embed/dQw4w9WgXcQ",
-      dedupe_key: "youtube:dQw4w9WgXcQ",
+      kind: "fallback",
+      identity: "v1:external:fixture-fallback-youtube",
+      required_origins: [],
+      policy_revision: null,
+      fallback_reason: "invalid_youtube_url",
     },
   };
+}
+function feedResponse(helper, payload) {
+  const { scan_limit_reached, ...feed } = payload;
+
+  return helper.response({
+    schema_version: 1,
+    feed_revision: "fixture-feed-revision",
+    ...feed,
+    scan: {
+      candidates_scanned: feed.items?.length || 0,
+      scan_limit_reached: Boolean(scan_limit_reached),
+      end_reached: feed.next_cursor === null,
+    },
+  });
+}
+
+function installVideoShortsContractHandlers(needs) {
+  needs.pretender((server, helper) => {
+    server.get("/videos/policy.json", () =>
+      helper.response({
+        revision: 0,
+        external_media_enabled: false,
+        origins: [],
+        generated_at: "2026-06-07T00:00:00.000Z",
+      }),
+    );
+    server.get("/posts/:post_id.json", (request) =>
+      helper.response({
+        id: Number(request.params.post_id),
+        topic_id: Number(request.params.post_id),
+        post_number: 1,
+        username: "video-author",
+      }),
+    );
+    server.get("/videos/posts/:post_id/comments.json", (request) =>
+      helper.response({
+        comments: [],
+        has_more: false,
+        next_cursor: null,
+        visible_reply_count: 0,
+        change_cursor: null,
+        source_post_id: Number(request.params.post_id),
+      }),
+    );
+    server.get("/videos/posts/:post_id/comments/delta.json", () =>
+      helper.response({
+        changes: [],
+        has_more: false,
+        next_change_cursor: null,
+        visible_reply_count: 0,
+      }),
+    );
+    server.post("/videos/authorization-leases.json", () =>
+      helper.response({ leases: [] }),
+    );
+  });
 }
 
 acceptance("Video Shorts dedicated playback surface", function (needs) {
   needs.settings({ video_shorts_enabled: true });
+  installVideoShortsContractHandlers(needs);
   needs.user();
 
-  test("renders a dedicated playback surface for YouTube iframe candidates", async function (assert) {
-    needs.pretender((server, helper) => {
+  test("renders a dedicated playback surface for YouTube embeds", async function (assert) {
+    ((server, helper) => {
       server.get("/videos.json", () =>
-        helper.response({
+        feedResponse(helper, {
           items: [youtubeItem()],
           next_cursor: null,
           scan_limit_reached: false,
         }),
       );
-    });
+    })(pretender, pretenderHelpers());
 
     await visit("/videos");
 
@@ -188,16 +246,16 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
       .exists();
   });
 
-  test("renders a real iframe for Bilibili iframe candidates", async function (assert) {
-    needs.pretender((server, helper) => {
+  test("renders a real iframe for Bilibili embeds", async function (assert) {
+    ((server, helper) => {
       server.get("/videos.json", () =>
-        helper.response({
+        feedResponse(helper, {
           items: [bilibiliItem()],
           next_cursor: null,
           scan_limit_reached: false,
         }),
       );
-    });
+    })(pretender, pretenderHelpers());
 
     await visit("/videos");
 
@@ -206,7 +264,7 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
       .dom(".video-shorts-embed-player iframe")
       .hasAttribute(
         "src",
-        "https://player.bilibili.com/player.html?bvid=BV1Q541167Qg&page=2",
+        "https://player.bilibili.com/player.html?bvid=BV1Q541167Qg&page=1",
       );
     assert
       .dom(".video-shorts-embed-player iframe")
@@ -217,16 +275,16 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
     assert.dom(".video-shorts-embed-player__fallback").doesNotExist();
   });
 
-  test("rejects untrusted iframe candidates before rendering provider iframes", async function (assert) {
-    needs.pretender((server, helper) => {
+  test("uses the post URL for fallback media instead of rendering an iframe", async function (assert) {
+    ((server, helper) => {
       server.get("/videos.json", () =>
-        helper.response({
-          items: [untrustedYoutubeItem()],
+        feedResponse(helper, {
+          items: [fallbackItem()],
           next_cursor: null,
           scan_limit_reached: false,
         }),
       );
-    });
+    })(pretender, pretenderHelpers());
 
     await visit("/videos");
 
@@ -234,22 +292,18 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
     assert
       .dom(".video-shorts-embed-player__fallback")
       .hasAttribute("href", "/t/youtube-short/101/1");
-    assert.dom(".video-shorts-embed-player").doesNotIncludeText("<iframe");
-    assert
-      .dom(".video-shorts-embed-player")
-      .doesNotIncludeText("example.com/embed");
   });
 
   test("renders only native Discourse actions in the action rail", async function (assert) {
-    needs.pretender((server, helper) => {
+    ((server, helper) => {
       server.get("/videos.json", () =>
-        helper.response({
+        feedResponse(helper, {
           items: [actionableYoutubeItem()],
           next_cursor: null,
           scan_limit_reached: false,
         }),
       );
-    });
+    })(pretender, pretenderHelpers());
 
     await visit("/videos");
 
@@ -275,15 +329,15 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
   });
 
   test("opens native Discourse share and flag modals from the action rail", async function (assert) {
-    needs.pretender((server, helper) => {
+    ((server, helper) => {
       server.get("/videos.json", () =>
-        helper.response({
+        feedResponse(helper, {
           items: [actionableYoutubeItem()],
           next_cursor: null,
           scan_limit_reached: false,
         }),
       );
-    });
+    })(pretender, pretenderHelpers());
 
     const shownModals = [];
     const modal = this.owner.lookup("service:modal");
@@ -322,10 +376,10 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
     ]);
   });
 
-  test("bounds media players to the active screen", async function (assert) {
-    needs.pretender((server, helper) => {
+  test("mounts native players for the active item and immediate neighbor only", async function (assert) {
+    ((server, helper) => {
       server.get("/videos.json", () =>
-        helper.response({
+        feedResponse(helper, {
           items: [
             nativeItem(0),
             nativeItem(1),
@@ -337,7 +391,7 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
           scan_limit_reached: false,
         }),
       );
-    });
+    })(pretender, pretenderHelpers());
 
     await visit("/videos");
 
@@ -351,20 +405,37 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
         '.video-shorts-embed-player iframe[src="https://player.bilibili.com/player.html?bvid=BV1Q541167Qg&page=2"]',
       )
       .doesNotExist();
-    assert.dom(".video-shorts-native-player__video").exists({ count: 1 });
-    assert.dom(".video-shorts-item__media-placeholder").exists({ count: 4 });
+    assert.dom(".video-shorts-native-player__video").exists({ count: 2 });
+    assert.dom(".video-shorts-item__media-placeholder").exists({ count: 3 });
+
+    await triggerKeyEvent(".video-shorts-feed__items", "keydown", "ArrowDown");
+    await waitUntil(
+      () =>
+        document
+          .querySelector('[data-post-id="201"]')
+          ?.getAttribute("aria-current") === "true",
+    );
+
+    assert.dom(".video-shorts-native-player__video").exists({ count: 3 });
+    assert.strictEqual(
+      document.querySelectorAll(
+        ".video-shorts-native-player__video, .video-shorts-embed-player iframe",
+      ).length,
+      3,
+      "only the active native player and its immediate neighbors are mounted",
+    );
   });
 
-  test("unmounts provider iframes when the active item changes", async function (assert) {
-    needs.pretender((server, helper) => {
+  test("unmounts embeds when the active item changes", async function (assert) {
+    ((server, helper) => {
       server.get("/videos.json", () =>
-        helper.response({
+        feedResponse(helper, {
           items: [youtubeItem(), bilibiliItem(), nativeItem(0)],
           next_cursor: null,
           scan_limit_reached: false,
         }),
       );
-    });
+    })(pretender, pretenderHelpers());
 
     await visit("/videos");
 
@@ -405,16 +476,154 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
       .exists({ count: 1 });
   });
 
-  test("defines the vertical snap player layout contract", async function (assert) {
-    needs.pretender((server, helper) => {
+  test("cleans up active-only embeds when navigating A to B to A", async function (assert) {
+    ((server, helper) => {
       server.get("/videos.json", () =>
-        helper.response({
+        feedResponse(helper, {
+          items: [nativeItem(0), youtubeItem(), nativeItem(1)],
+          next_cursor: null,
+          scan_limit_reached: false,
+        }),
+      );
+    })(pretender, pretenderHelpers());
+
+    await visit("/videos");
+
+    assert.dom(".video-shorts-native-player").exists({ count: 1 });
+    assert.dom(".video-shorts-embed-player iframe").doesNotExist();
+
+    await triggerKeyEvent(".video-shorts-feed__items", "keydown", "ArrowDown");
+    await waitUntil(
+      () =>
+        document
+          .querySelector('[data-post-id="101"]')
+          ?.getAttribute("aria-current") === "true",
+    );
+
+    assert.dom(".video-shorts-native-player").exists({ count: 2 });
+    assert.dom(".video-shorts-embed-player iframe").exists({ count: 1 });
+
+    await triggerKeyEvent(".video-shorts-feed__items", "keydown", "ArrowUp");
+    await waitUntil(
+      () =>
+        document
+          .querySelector('[data-post-id="200"]')
+          ?.getAttribute("aria-current") === "true",
+    );
+
+    assert.dom(".video-shorts-native-player").exists({ count: 1 });
+    assert.dom(".video-shorts-embed-player iframe").doesNotExist();
+  });
+
+  test("pauses a preloaded neighbor when it starts playback", async function (assert) {
+    ((server, helper) => {
+      server.get("/videos.json", () =>
+        feedResponse(helper, {
+          items: [nativeItem(0), nativeItem(1)],
+          next_cursor: null,
+          scan_limit_reached: false,
+        }),
+      );
+    })(pretender, pretenderHelpers());
+
+    await visit("/videos");
+
+    const [, neighbor] = document.querySelectorAll(
+      ".video-shorts-native-player__video",
+    );
+    let pauses = 0;
+    neighbor.pause = () => pauses++;
+
+    neighbor.dispatchEvent(new Event("play"));
+
+    assert.strictEqual(pauses, 1, "the inactive player is paused");
+  });
+
+  test("resumes mounted native players after hidden to visible", async function (assert) {
+    ((server, helper) => {
+      server.get("/videos.json", () =>
+        feedResponse(helper, {
+          items: [nativeItem(0), nativeItem(1)],
+          next_cursor: null,
+          scan_limit_reached: false,
+        }),
+      );
+    })(pretender, pretenderHelpers());
+
+    await visit("/videos");
+
+    const visibilityState = Object.getOwnPropertyDescriptor(
+      document,
+      "visibilityState",
+    );
+
+    try {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        value: "hidden",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        value: "visible",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+
+      await waitUntil(() =>
+        [...document.querySelectorAll(".video-shorts-native-player__video")].every(
+          (video) => video.getAttribute("src"),
+        ),
+      );
+      assert.dom(".video-shorts-native-player__video").exists({ count: 2 });
+    } finally {
+      if (visibilityState) {
+        Object.defineProperty(document, "visibilityState", visibilityState);
+      } else {
+        delete document.visibilityState;
+      }
+    }
+  });
+
+  test("continues loading near the end without a load-more button", async function (assert) {
+    let continuationRequests = 0;
+
+    ((server, helper) => {
+      server.get("/videos.json", (request) => {
+        if (request.queryParams.cursor === "next") {
+          continuationRequests += 1;
+          return feedResponse(helper, {
+            items: [nativeItem(1)],
+            next_cursor: null,
+            scan_limit_reached: false,
+          });
+        }
+
+        return feedResponse(helper, {
+          items: [nativeItem(0)],
+          next_cursor: "next",
+          scan_limit_reached: true,
+        });
+      });
+    })(pretender, pretenderHelpers());
+
+    await visit("/videos");
+
+    await waitUntil(() => document.querySelector('[data-post-id="201"]'));
+
+    assert.strictEqual(continuationRequests, 1);
+    assert.dom(".video-shorts-load-more").doesNotExist();
+  });
+  test("defines the vertical snap player layout contract", async function (assert) {
+    ((server, helper) => {
+      server.get("/videos.json", () =>
+        feedResponse(helper, {
           items: [nativeItem(0), youtubeItem(), bilibiliItem()],
           next_cursor: null,
           scan_limit_reached: false,
         }),
       );
-    });
+    })(pretender, pretenderHelpers());
 
     await visit("/videos");
 
@@ -463,22 +672,24 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
   });
 
   test("keeps the active video in the URL and restores it after refresh", async function (assert) {
-    needs.pretender((server, helper) => {
+    ((server, helper) => {
       server.get("/videos.json", () =>
-        helper.response({
+        feedResponse(helper, {
           items: [youtubeItem(), bilibiliItem(), nativeItem(0)],
           next_cursor: null,
           scan_limit_reached: false,
         }),
       );
-    });
+    })(pretender, pretenderHelpers());
 
     await visit("/videos?post_id=102");
 
     const bilibili = document.querySelector('[data-post-id="102"]');
     const native = document.querySelector('[data-post-id="200"]');
 
-    await waitUntil(() => bilibili?.getAttribute("aria-current") === "true");
+    await waitUntil(() => bilibili?.getAttribute("aria-current") === "true", {
+      timeoutMessage: "requested Bilibili item did not become active",
+    });
 
     assert.strictEqual(
       currentURL(),
@@ -487,8 +698,9 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
     );
 
     await triggerKeyEvent(".video-shorts-feed__items", "keydown", "ArrowDown");
-    await waitUntil(() => native?.getAttribute("aria-current") === "true");
-    await waitUntil(() => currentURL() === "/videos?post_id=200");
+    await waitUntil(() => native?.getAttribute("aria-current") === "true", {
+      timeoutMessage: "keyboard navigation did not activate the native item",
+    });
 
     assert.strictEqual(
       currentURL(),
@@ -497,25 +709,33 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
     );
 
     await visit("/videos?post_id=200");
-    await waitUntil(() => native?.getAttribute("aria-current") === "true");
+    await waitUntil(
+      () =>
+        document
+          .querySelector('[data-post-id="200"]')
+          ?.getAttribute("aria-current") === "true",
+      {
+        timeoutMessage: "refreshed native item did not restore as active",
+      },
+    );
 
     assert
       .dom('.video-shorts-feed__item[aria-current="true"]')
       .hasAttribute("data-post-id", "200");
     assert.dom(".video-shorts-embed-player iframe").doesNotExist();
-    assert.dom(".video-shorts-native-player__video").exists({ count: 1 });
+    assert.dom(".video-shorts-native-player").exists({ count: 1 });
   });
 
   test("falls back safely for stale video post_id", async function (assert) {
-    needs.pretender((server, helper) => {
+    ((server, helper) => {
       server.get("/videos.json", () =>
-        helper.response({
+        feedResponse(helper, {
           items: [nativeItem(0), nativeItem(1)],
           next_cursor: null,
           scan_limit_reached: false,
         }),
       );
-    });
+    })(pretender, pretenderHelpers());
 
     await visit("/videos?post_id=999999");
 
@@ -526,13 +746,17 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
           ?.getAttribute("aria-current") === "true",
     );
 
+    await waitUntil(() => currentURL() === "/videos?post_id=200", {
+      timeoutMessage: "stale post id was not normalized to the visible item",
+    });
+
     assert
       .dom('.video-shorts-feed__item[aria-current="true"]')
       .hasAttribute("data-post-id", "200");
     assert.strictEqual(
       currentURL(),
       "/videos?post_id=200",
-      "stale ids fall back to the first visible item and replace the URL state",
+      "stale ids fall back visibly and normalize the URL to the visible item",
     );
     assert.dom(".video-shorts-item").exists({ count: 2 });
   });

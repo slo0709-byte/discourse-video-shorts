@@ -30,7 +30,7 @@ member.update!(active: true)
 member.activate
 
 SiteSetting.authorized_extensions =
-  (SiteSetting.authorized_extensions.split("|") + %w[mp4 webm mov m4v]).uniq.join("|")
+  (SiteSetting.authorized_extensions.split("|") + %w[mp4]).uniq.join("|")
 SiteSetting.video_shorts_enabled = true
 
 category =
@@ -44,19 +44,21 @@ private_category =
 private_category.set_permissions(group => :full)
 private_category.save!
 
-def create_topic_once(user:, title:, raw:, category:)
-  existing = Topic.find_by(title: title)
-  return existing if existing
+module DiscourseVideoShorts
+  def self.create_qa_topic_once(user:, title:, raw:, category:)
+    existing = Topic.find_by(title: title)
+    return existing if existing
 
-  post =
-    PostCreator.create!(
-      user,
-      title: title,
-      raw: raw,
-      category: category.id,
-      skip_validations: true,
-    )
-  post.topic
+    post =
+      PostCreator.create!(
+        user,
+        title: title,
+        raw: raw,
+        category: category.id,
+        skip_validations: true,
+      )
+    post.topic
+  end
 end
 
 fixture_path = Rails.root.join("plugins/discourse-video-shorts/spec/fixtures/files/tiny-video.mp4")
@@ -68,7 +70,7 @@ upload =
 
 topics = {}
 topics[:native] =
-  create_topic_once(
+  DiscourseVideoShorts.create_qa_topic_once(
     user: admin,
     title: "Video Shorts QA Native MP4",
     raw: "Native MP4 fixture\n\n#{upload.short_url}",
@@ -80,14 +82,14 @@ UploadReference.find_or_create_by!(
   target_id: topics[:native].first_post.id,
 )
 topics[:bilibili_canonical] =
-  create_topic_once(
+  DiscourseVideoShorts.create_qa_topic_once(
     user: admin,
     title: "Video Shorts QA Bilibili Canonical",
     raw: "https://www.bilibili.com/video/BV1Q541167Qg",
     category: category,
   )
 topics[:bilibili_iframe] =
-  create_topic_once(
+  DiscourseVideoShorts.create_qa_topic_once(
     user: admin,
     title: "Video Shorts QA Bilibili Cooked Iframe",
     raw:
@@ -95,35 +97,35 @@ topics[:bilibili_iframe] =
     category: category,
   )
 topics[:youtube_iframe] =
-  create_topic_once(
+  DiscourseVideoShorts.create_qa_topic_once(
     user: admin,
     title: "Video Shorts QA YouTube Cooked Iframe",
     raw: '<iframe src="https://www.youtube.com/embed/dQw4w9WgXcQ"></iframe>',
     category: category,
   )
 topics[:vimeo_iframe] =
-  create_topic_once(
+  DiscourseVideoShorts.create_qa_topic_once(
     user: admin,
     title: "Video Shorts QA Vimeo Cooked Iframe",
     raw: '<iframe src="https://player.vimeo.com/video/786646692"></iframe>',
     category: category,
   )
 topics[:unsupported] =
-  create_topic_once(
+  DiscourseVideoShorts.create_qa_topic_once(
     user: admin,
     title: "Video Shorts QA Unsupported Intended Video",
     raw: "https://example.invalid/videos/unsupported-sample.mp4?token=private#fragment",
     category: category,
   )
 topics[:non_video] =
-  create_topic_once(
+  DiscourseVideoShorts.create_qa_topic_once(
     user: admin,
     title: "Video Shorts QA Non Video",
     raw: "Plain discussion with no video media.",
     category: category,
   )
 topics[:private_native] =
-  create_topic_once(
+  DiscourseVideoShorts.create_qa_topic_once(
     user: member,
     title: "Video Shorts QA Private Native MP4",
     raw: "Private native MP4 fixture\n\n#{upload.short_url}",

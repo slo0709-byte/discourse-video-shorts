@@ -1,0 +1,51 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "discourse-video-shorts-hls.js",
+  "documentNamespace": "https://github.com/video-dev/hls.js/releases/tag/v1.6.16#discourse-video-shorts-442f599c34f103c3355b375a23bdff560592d7117d09a8c847242ea3de2d40e0",
+  "creationInfo": {
+    "created": "2026-07-10T00:00:00Z",
+    "creators": [
+      "Tool: discourse-video-shorts supply-chain inventory"
+    ]
+  },
+  "packages": [
+    {
+      "name": "hls.js",
+      "SPDXID": "SPDXRef-Package-hls.js",
+      "versionInfo": "1.6.16",
+      "downloadLocation": "https://github.com/video-dev/hls.js/releases/tag/v1.6.16",
+      "filesAnalyzed": true,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "Copyright (c) 2017 Dailymotion"
+    }
+  ],
+  "files": [
+    {
+      "fileName": "./public/javascripts/hls.min.js",
+      "SPDXID": "SPDXRef-File-hls.min.js",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "442f599c34f103c3355b375a23bdff560592d7117d09a8c847242ea3de2d40e0"
+        }
+      ],
+      "licenseConcluded": "Apache-2.0",
+      "copyrightText": "Copyright (c) 2017 Dailymotion"
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-hls.js"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-hls.js",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-File-hls.min.js"
+    }
+  ]
+}

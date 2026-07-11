@@ -6,6 +6,15 @@ export const VIDEO_SHORTS_AUTO_CONTINUATION_LIMIT = 3;
 export const VIDEO_SHORTS_AUTO_CONTINUATION_MS = 1500;
 export const VIDEO_SHORTS_RESTORE_CONTINUATION_LIMIT = 5;
 export const VIDEO_SHORTS_RESTORE_CONTINUATION_MS = 2500;
+export const VIDEO_SHORTS_PROTOCOL_MAX_REQUESTS = 22;
+
+export class VideoShortsFeedProtocolError extends Error {
+  constructor(reason) {
+    super(`video_shorts_protocol_error:${reason}`);
+    this.name = "VideoShortsFeedProtocolError";
+    this.reason = reason;
+  }
+}
 
 export function mergeVideoShortsItems(existingItems, incomingItems) {
   const seenPostIds = new Set(existingItems.map((item) => item.post_id));
@@ -26,6 +35,7 @@ export function mergeVideoShortsItems(existingItems, incomingItems) {
 export async function fetchVideoShortsPage({
   cursor = null,
   pageSize = VIDEO_SHORTS_PAGE_SIZE,
+  signal,
 } = {}) {
   const data = { page_size: pageSize };
 
@@ -33,7 +43,24 @@ export async function fetchVideoShortsPage({
     data.cursor = cursor;
   }
 
-  return await ajax("/videos.json", { data });
+  const request = ajax("/videos.json", { data });
+
+  if (!signal) {
+    return await request;
+  }
+
+  const abortRequest = () => request.abort?.();
+  if (signal.aborted) {
+    abortRequest();
+  } else {
+    signal.addEventListener("abort", abortRequest, { once: true });
+  }
+
+  try {
+    return await request;
+  } finally {
+    signal.removeEventListener("abort", abortRequest);
+  }
 }
 
 export async function loadInitialVideoShortsFeed({
@@ -44,17 +71,18 @@ export async function loadInitialVideoShortsFeed({
   let items = [];
   let nextCursor = null;
   let scanLimitReached = false;
-  let continuationRequests = 0;
+  let requestCount = 0;
   const requestedPostId = restorePostId ? String(restorePostId) : null;
-  const startedAt = Date.now();
+  const seenCursors = new Set();
 
   try {
     let response = await fetchVideoShortsPage({ pageSize });
+    requestCount += 1;
 
     while (true) {
       items = mergeVideoShortsItems(items, response.items);
       nextCursor = response.next_cursor;
-      scanLimitReached = Boolean(response.scan_limit_reached);
+      scanLimitReached = Boolean(response.scan?.scan_limit_reached);
 
       const needsContinuation =
         items.length < preloadItems && scanLimitReached && nextCursor;
@@ -63,49 +91,33 @@ export async function loadInitialVideoShortsFeed({
         items.some((item) => String(item.post_id) === requestedPostId);
       const needsRestoreContinuation =
         requestedPostId && !restoreTargetFound && nextCursor;
-      const underRequestCap =
-        continuationRequests <
-        Math.max(
-          VIDEO_SHORTS_AUTO_CONTINUATION_LIMIT,
-          VIDEO_SHORTS_RESTORE_CONTINUATION_LIMIT
-        );
-      const underTimeCap =
-        Date.now() - startedAt <
-        Math.max(
-          VIDEO_SHORTS_AUTO_CONTINUATION_MS,
-          VIDEO_SHORTS_RESTORE_CONTINUATION_MS
-        );
-      const preloadCanContinue =
-        needsContinuation &&
-        continuationRequests < VIDEO_SHORTS_AUTO_CONTINUATION_LIMIT;
-      const restoreCanContinue =
-        needsRestoreContinuation &&
-        continuationRequests < VIDEO_SHORTS_RESTORE_CONTINUATION_LIMIT;
-
-      if (
-        (!preloadCanContinue && !restoreCanContinue) ||
-        !underRequestCap ||
-        !underTimeCap
-      ) {
+      if (!needsContinuation && !needsRestoreContinuation) {
         break;
       }
 
-      continuationRequests += 1;
+      if (requestCount >= VIDEO_SHORTS_PROTOCOL_MAX_REQUESTS) {
+        throw new VideoShortsFeedProtocolError("request_bound_exceeded");
+      }
+
+      const cursor = String(nextCursor);
+      if (seenCursors.has(cursor)) {
+        throw new VideoShortsFeedProtocolError("cursor_did_not_advance");
+      }
+      seenCursors.add(cursor);
+
       response = await fetchVideoShortsPage({ cursor: nextCursor, pageSize });
+      requestCount += 1;
     }
 
     return {
       items,
       nextCursor,
       scanLimitReached,
-      autoContinuationCapped: Boolean(
-        items.length < preloadItems && scanLimitReached && nextCursor
-      ),
       error: null,
       failedCursor: null,
       requestedPostId,
       initialActivePostId: items.some(
-        (item) => String(item.post_id) === requestedPostId
+        (item) => String(item.post_id) === requestedPostId,
       )
         ? requestedPostId
         : null,
@@ -115,10 +127,9 @@ export async function loadInitialVideoShortsFeed({
       items,
       nextCursor,
       scanLimitReached,
-      autoContinuationCapped: false,
       error,
       failedCursor: nextCursor,
-      requestedPostId,
+      requestedPostId: null,
       initialActivePostId: null,
     };
   }

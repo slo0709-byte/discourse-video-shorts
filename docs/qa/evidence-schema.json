@@ -1,0 +1,269 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://discourse.example.invalid/video-shorts/qa/evidence-schema-v1.json",
+  "title": "Discourse Video Shorts QA evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run", "matrix", "responsiveness", "comment_sync", "authorization_revocation", "policy_revocation", "data_gate", "long_session", "visual", "critical_flows", "rollback", "defects"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "run": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "started_at", "discourse_tag", "discourse_commit", "environment"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "started_at": { "type": "string", "format": "date-time" },
+        "discourse_tag": { "const": "v2026.7.0-latest" },
+        "discourse_commit": { "const": "ded677e00beb0e9bae6e70b69582aecfb72b5477" },
+        "environment": {
+          "type": "object", "additionalProperties": false,
+          "required": ["browsers", "app_cpu_cores", "app_ram_mib", "app_config_artifact", "db_cpu_cores", "db_ram_mib", "db_config_artifact", "plugin_manifest_artifact", "cache_mode", "cache_config_artifact", "background_load_artifact"],
+          "properties": {
+            "browsers": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "$ref": "#/$defs/browser_provenance" } },
+            "app_cpu_cores": { "type": "number", "exclusiveMinimum": 0 },
+            "app_ram_mib": { "type": "number", "exclusiveMinimum": 0 },
+            "app_config_artifact": { "$ref": "#/$defs/artifact" },
+            "db_cpu_cores": { "type": "number", "exclusiveMinimum": 0 },
+            "db_ram_mib": { "type": "number", "exclusiveMinimum": 0 },
+            "db_config_artifact": { "$ref": "#/$defs/artifact" },
+            "plugin_manifest_artifact": { "$ref": "#/$defs/artifact" },
+            "cache_mode": { "type": "string", "minLength": 1 },
+            "cache_config_artifact": { "$ref": "#/$defs/artifact" },
+            "background_load_artifact": { "$ref": "#/$defs/artifact" }
+          }
+        }
+      }
+    },
+    "matrix": { "type": "array", "minItems": 16, "maxItems": 16, "items": { "$ref": "#/$defs/matrix_entry" } },
+    "responsiveness": {
+      "type": "object", "additionalProperties": false,
+      "required": ["cold_start", "thirty_switch_ms", "artifact"],
+      "properties": {
+        "cold_start": {
+          "type": "array", "minItems": 2, "maxItems": 2,
+          "items": { "$ref": "#/$defs/cold_start_scenario" }
+        },
+        "thirty_switch_ms": { "$ref": "#/$defs/timing_samples" },
+        "artifact": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "comment_sync": {
+      "type": "object", "additionalProperties": false,
+      "required": ["scenarios"],
+      "properties": { "scenarios": { "type": "array", "minItems": 8, "items": { "$ref": "#/$defs/comment_scenario" } } }
+    },
+    "authorization_revocation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["samples_ms", "clear_sensitive_cache", "disable_writes", "close_comments", "artifact"],
+      "properties": {
+        "samples_ms": { "$ref": "#/$defs/timing_samples" },
+        "clear_sensitive_cache": { "const": true }, "disable_writes": { "const": true }, "close_comments": { "const": true },
+        "artifact": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "policy_revocation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["detection_ms", "post_observation_deleted_origin_requests", "artifact"],
+      "properties": {
+        "detection_ms": { "$ref": "#/$defs/timing_samples" },
+        "post_observation_deleted_origin_requests": { "type": "integer", "const": 0 },
+        "artifact": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "data_gate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["stage", "candidate_count", "seed", "warmup_traversals", "warmup_seconds", "concurrency", "duration_seconds_per_round", "background_load_percent", "completed_full_sequences", "rounds", "metrics", "raw_artifacts", "passed"],
+      "properties": {
+        "stage": { "const": "ui_pre_data_layer" }, "candidate_count": { "const": 10000 }, "seed": { "const": 20260710 },
+        "warmup_traversals": { "type": "integer", "minimum": 5 }, "warmup_seconds": { "type": "number", "minimum": 300 },
+        "concurrency": { "const": 20 }, "duration_seconds_per_round": { "type": "number", "minimum": 1800 },
+        "background_load_percent": { "type": "number", "minimum": 70 }, "completed_full_sequences": { "type": "integer", "minimum": 30 },
+        "rounds": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "$ref": "#/$defs/data_round" } },
+        "metrics": { "$ref": "#/$defs/data_metrics" },
+        "raw_artifacts": { "$ref": "#/$defs/raw_artifacts" }, "passed": { "const": true }
+      }
+    },
+    "long_session": {
+      "type": "array", "minItems": 8, "maxItems": 8,
+      "items": { "$ref": "#/$defs/long_session_round" },
+      "allOf": [
+        { "contains": { "properties": { "browser": { "const": "desktop-chrome" }, "round": { "const": 1 } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "browser": { "const": "desktop-chrome" }, "round": { "const": 2 } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "browser": { "const": "desktop-chrome" }, "round": { "const": 3 } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "browser": { "const": "desktop-edge" }, "round": { "const": 1 } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "browser": { "const": "desktop-edge" }, "round": { "const": 2 } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "browser": { "const": "desktop-edge" }, "round": { "const": 3 } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "browser": { "const": "iphone-safari" }, "round": { "const": 1 } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "browser": { "const": "android-chrome" }, "round": { "const": 1 } } }, "minContains": 1, "maxContains": 1 }
+      ]
+    },
+    "visual": {
+      "type": "array", "minItems": 14, "maxItems": 14,
+      "items": { "$ref": "#/$defs/visual_entry" },
+      "allOf": [
+        { "contains": { "properties": { "browser": { "const": "desktop-chrome" }, "viewport": { "const": "desktop-1440x900" }, "theme": { "const": "light" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "browser": { "const": "desktop-chrome" }, "viewport": { "const": "desktop-1440x900" }, "theme": { "const": "dark" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "browser": { "const": "desktop-chrome" }, "viewport": { "const": "desktop-narrow" }, "theme": { "const": "light" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "browser": { "const": "desktop-chrome" }, "viewport": { "const": "desktop-narrow" }, "theme": { "const": "dark" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "browser": { "const": "desktop-edge" }, "viewport": { "const": "desktop-1440x900" }, "theme": { "const": "light" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "browser": { "const": "desktop-edge" }, "viewport": { "const": "desktop-1440x900" }, "theme": { "const": "dark" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "browser": { "const": "desktop-edge" }, "viewport": { "const": "desktop-narrow" }, "theme": { "const": "light" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "browser": { "const": "desktop-edge" }, "viewport": { "const": "desktop-narrow" }, "theme": { "const": "dark" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "browser": { "const": "iphone-safari" }, "viewport": { "const": "iphone-portrait" }, "theme": { "const": "light" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "browser": { "const": "iphone-safari" }, "viewport": { "const": "iphone-portrait" }, "theme": { "const": "dark" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "browser": { "const": "iphone-safari" }, "viewport": { "const": "iphone-landscape" }, "theme": { "const": "light" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "browser": { "const": "iphone-safari" }, "viewport": { "const": "iphone-landscape" }, "theme": { "const": "dark" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "browser": { "const": "android-chrome" }, "viewport": { "const": "android-portrait" }, "theme": { "const": "light" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "browser": { "const": "android-chrome" }, "viewport": { "const": "android-portrait" }, "theme": { "const": "dark" } } }, "minContains": 1, "maxContains": 1 }
+      ]
+    },
+    "critical_flows": {
+      "type": "array", "minItems": 4, "maxItems": 4,
+      "items": { "$ref": "#/$defs/critical_flow" },
+      "allOf": [
+        { "contains": { "properties": { "id": { "const": "offline-recovery" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "id": { "const": "lifecycle-a-b-a" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "id": { "const": "admin-diagnostics" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "id": { "const": "native-actions" } } }, "minContains": 1, "maxContains": 1 }
+      ]
+    },
+    "rollback": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sequence", "discourse_commit", "old_plugin_revision", "new_plugin_revision", "executed_at", "operator", "core_writes_preserved", "new_jobs_running", "artifact", "passed"],
+      "properties": {
+        "sequence": { "const": "old-new-old" }, "discourse_commit": { "const": "ded677e00beb0e9bae6e70b69582aecfb72b5477" },
+        "old_plugin_revision": { "type": "string", "minLength": 1 }, "new_plugin_revision": { "type": "string", "minLength": 1 },
+        "executed_at": { "type": "string", "format": "date-time" }, "operator": { "type": "string", "minLength": 1 },
+        "core_writes_preserved": { "const": true }, "new_jobs_running": { "const": 0 },
+        "artifact": { "$ref": "#/$defs/artifact" }, "passed": { "const": true }
+      }
+    },
+    "defects": {
+      "type": "object", "additionalProperties": false,
+      "required": ["p0", "p1", "p2", "p3"],
+      "properties": {
+        "p0": { "const": 0 }, "p1": { "const": 0 },
+        "p2": { "type": "array", "items": { "$ref": "#/$defs/defect_record" } },
+        "p3": { "type": "array", "items": { "$ref": "#/$defs/defect_record" } }
+      }
+    }
+  },
+  "$defs": {
+    "browser": { "type": "string", "enum": ["desktop-chrome", "desktop-edge", "iphone-safari", "android-chrome"] },
+    "media": { "type": "string", "enum": ["bilibili", "youtube", "upload_mp4", "external_mp4_or_hls"] },
+    "artifact": { "type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*\\.\\.)[A-Za-z0-9][A-Za-z0-9._/-]*$" },
+    "timing_samples": { "type": "array", "minItems": 30, "items": { "type": "number", "minimum": 0 } },
+    "browser_provenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["browser", "version", "device", "os", "real_device", "provenance_artifact"],
+      "properties": {
+        "browser": { "$ref": "#/$defs/browser" }, "version": { "type": "string", "minLength": 1, "pattern": "[0-9]" },
+        "device": { "type": "string", "minLength": 1 }, "os": { "type": "string", "minLength": 1 }, "real_device": { "const": true },
+        "provenance_artifact": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "cold_start_scenario": {
+      "type": "object", "additionalProperties": false,
+      "required": ["network", "samples_ms"],
+      "properties": {
+        "network": { "type": "string", "enum": ["4g", "wifi"] },
+        "samples_ms": { "type": "array", "minItems": 10, "items": { "type": "number", "minimum": 0 } }
+      }
+    },
+    "matrix_entry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["browser", "media", "passed", "screenshot", "trace"],
+      "properties": {
+        "browser": { "$ref": "#/$defs/browser" }, "media": { "$ref": "#/$defs/media" }, "passed": { "const": true },
+        "screenshot": { "$ref": "#/$defs/artifact" }, "trace": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "comment_scenario": {
+      "type": "object", "additionalProperties": false,
+      "required": ["descendant_count", "operation", "target", "samples_ms", "duplicates", "incorrect_counts", "artifact"],
+      "properties": {
+        "descendant_count": { "type": "integer", "minimum": 1 }, "operation": { "type": "string", "enum": ["create", "edit", "delete"] },
+        "target": { "type": "string", "enum": ["new", "first", "201st"] }, "samples_ms": { "$ref": "#/$defs/timing_samples" },
+        "duplicates": { "const": 0 }, "incorrect_counts": { "const": 0 }, "artifact": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "data_round": {
+      "type": "object", "additionalProperties": false,
+      "required": ["round", "duration_seconds", "users", "background_load_percent", "completed_full_sequences", "raw_samples_artifact"],
+      "properties": {
+        "round": { "type": "integer", "minimum": 1, "maximum": 3 }, "duration_seconds": { "type": "number", "minimum": 1800 },
+        "users": { "const": 20 }, "background_load_percent": { "type": "number", "minimum": 70 },
+        "completed_full_sequences": { "type": "integer", "minimum": 0 }, "raw_samples_artifact": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "data_metrics": {
+      "type": "object", "additionalProperties": false,
+      "required": ["unauthorized_leaks", "duplicates", "omissions", "cursor_loops", "page_p95_ms", "page_p99_ms", "max_request_ms", "sql_p95", "scans_per_request_max", "rss_delta_mib", "http_responses_p95_per_20", "scan_per_item_p95", "end_response_count"],
+      "properties": {
+        "unauthorized_leaks": { "const": 0 }, "duplicates": { "const": 0 }, "omissions": { "const": 0 }, "cursor_loops": { "const": 0 },
+        "page_p95_ms": { "type": "number", "maximum": 350 }, "page_p99_ms": { "type": "number", "maximum": 750 }, "max_request_ms": { "type": "number", "maximum": 2000 },
+        "sql_p95": { "type": "number", "maximum": 20 }, "scans_per_request_max": { "type": "number", "maximum": 500 }, "rss_delta_mib": { "type": "number", "maximum": 150 },
+        "http_responses_p95_per_20": { "type": "number", "maximum": 5 }, "scan_per_item_p95": { "type": "number", "maximum": 20 }, "end_response_count": { "type": "number", "maximum": 22 }
+      }
+    },
+    "raw_artifacts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["benchmark_output", "identity_manifest", "environment_load", "round_samples"],
+      "properties": {
+        "benchmark_output": { "$ref": "#/$defs/artifact" }, "identity_manifest": { "$ref": "#/$defs/artifact" },
+        "environment_load": { "$ref": "#/$defs/artifact" },
+        "round_samples": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "$ref": "#/$defs/artifact" } }
+      }
+    },
+    "long_session_round": {
+      "type": "object", "additionalProperties": false,
+      "required": ["round", "surface", "browser", "switches", "warmup_switches", "first_quarter_samples_ms", "final_quarter_samples_ms", "observation_duration_ms", "cumulative_long_task_duration_ms", "metrics", "trace", "passed"],
+      "properties": {
+        "round": { "type": "integer", "minimum": 1, "maximum": 3 }, "surface": { "type": "string", "enum": ["desktop", "mobile"] },
+        "browser": { "$ref": "#/$defs/browser" }, "switches": { "type": "integer", "minimum": 1000 }, "warmup_switches": { "type": "integer", "minimum": 100 },
+        "first_quarter_samples_ms": { "type": "array", "minItems": 250, "items": { "type": "number", "minimum": 0 } },
+        "final_quarter_samples_ms": { "type": "array", "minItems": 250, "items": { "type": "number", "minimum": 0 } },
+        "observation_duration_ms": { "type": "number", "exclusiveMinimum": 0 }, "cumulative_long_task_duration_ms": { "type": "number", "minimum": 0 },
+        "metrics": {
+          "type": "object", "additionalProperties": false,
+          "required": ["heap_delta_mib", "media_instances_max", "feed_dom_items_max", "listener_delta", "subscription_delta", "audible_players_max", "late_mounts", "passed"],
+          "properties": {
+            "heap_delta_mib": { "type": "number", "maximum": 30 }, "media_instances_max": { "type": "integer", "maximum": 3 },
+            "feed_dom_items_max": { "type": "integer", "maximum": 60 }, "listener_delta": { "type": "integer", "maximum": 5 },
+            "subscription_delta": { "type": "integer", "maximum": 5 }, "audible_players_max": { "type": "integer", "maximum": 1 },
+            "late_mounts": { "const": 0 }, "passed": { "const": true }
+          }
+        },
+        "trace": { "$ref": "#/$defs/artifact" }, "passed": { "const": true }
+      }
+    },
+    "visual_entry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["browser", "viewport", "theme", "baseline", "actual", "diff_ratio", "manual_passed"],
+      "properties": {
+        "browser": { "$ref": "#/$defs/browser" },
+        "viewport": { "type": "string", "enum": ["desktop-1440x900", "desktop-narrow", "iphone-portrait", "iphone-landscape", "android-portrait"] },
+        "theme": { "type": "string", "enum": ["light", "dark"] },
+        "baseline": { "$ref": "#/$defs/artifact" }, "actual": { "$ref": "#/$defs/artifact" },
+        "diff_ratio": { "type": "number", "minimum": 0, "maximum": 0.005 }, "manual_passed": { "const": true }
+      }
+    },
+    "critical_flow": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "passed", "artifact"],
+      "properties": {
+        "id": { "type": "string", "enum": ["offline-recovery", "lifecycle-a-b-a", "admin-diagnostics", "native-actions"] },
+        "passed": { "const": true },
+        "artifact": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "defect_record": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "status", "artifact"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 }, "status": { "type": "string", "enum": ["open", "accepted", "fixed", "verified"] },
+        "artifact": { "$ref": "#/$defs/artifact" }
+      }
+    }
+  }
+}

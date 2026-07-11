@@ -4,14 +4,23 @@ import DiscourseRoute from "discourse/routes/discourse";
 
 export default class VideoShortsDiagnosticsRoute extends DiscourseRoute {
   async model() {
-    try {
-      return await ajax(
-        "/admin/plugins/discourse-video-shorts/diagnostics.json",
-      );
-    } catch (error) {
-      popupAjaxError(error);
+    const [diagnostics, originPolicy] = await Promise.allSettled([
+      ajax("/admin/plugins/discourse-video-shorts/diagnostics.json"),
+      ajax("/admin/plugins/discourse-video-shorts/origins.json"),
+    ]);
 
-      return { error: true };
+    if (diagnostics.status === "rejected") {
+      popupAjaxError(diagnostics.reason);
     }
+
+    return {
+      diagnostics:
+        diagnostics.status === "fulfilled"
+          ? diagnostics.value
+          : { error: true },
+      originPolicy:
+        originPolicy.status === "fulfilled" ? originPolicy.value : null,
+      originPolicyError: originPolicy.status === "rejected",
+    };
   }
 }

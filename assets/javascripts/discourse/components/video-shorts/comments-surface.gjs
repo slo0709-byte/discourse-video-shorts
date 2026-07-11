@@ -23,7 +23,12 @@ import {
   fetchVideoShortsComment,
   updateVideoShortsComment,
 } from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-comment-actions";
-import { fetchVideoShortsComments } from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-comments";
+import {
+  fetchVideoShortsCommentDelta,
+  fetchVideoShortsComments,
+  isDeltaExpired,
+  normalizeComment,
+} from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-comments";
 import {
   createVideoShortsReply,
   videoShortsReplyErrorMessage,
@@ -126,6 +131,8 @@ export default class VideoShortsCommentsSurface extends Component {
   @service dialog;
   @service modal;
   @service store;
+  @service videoShortsRealtime;
+  @service videoShortsAuthorizationLease;
 
   @tracked comments = [];
   @tracked loading = true;
@@ -133,6 +140,8 @@ export default class VideoShortsCommentsSurface extends Component {
   @tracked error = null;
   @tracked hasMore = false;
   @tracked nextAfter = null;
+  @tracked changeCursor = null;
+  @tracked writesDisabled = false;
 
   @tracked replyText = "";
   @tracked replyError = null;
@@ -167,6 +176,12 @@ export default class VideoShortsCommentsSurface extends Component {
   activePostId = null;
   loadToken = 0;
   loadingReplyPromisesByPostId = {};
+  unsubscribeRealtime = null;
+  releaseAuthorizationLease = null;
+  sessionListeners = null;
+  deltaRetryTimer = null;
+  deltaRetryAttempt = 0;
+  deltaDrainRequested = false;
 
   loadForItem = modifier((element, [item]) => {
     if (!item || item.post_id === this.activePostId) {
@@ -185,11 +200,16 @@ export default class VideoShortsCommentsSurface extends Component {
     this.hasDeletedPlaceholderContext = false;
     this.hasMore = false;
     this.nextAfter = null;
+    this.changeCursor = null;
+    this.writesDisabled = false;
     this.actionSheetPostId = null;
     this.resetReplyState();
     this.resetCommentReplyState();
     this.resetEditingState();
-    this.loadComments({ item });
+    this.stopCommentSession();
+    this.startCommentSession();
+    this.loadComments({ item }).then(() => this.drainDeltas());
+    return () => this.stopCommentSession();
   });
 
   focusInput = modifier((element) => {
@@ -300,11 +320,11 @@ export default class VideoShortsCommentsSurface extends Component {
   };
 
   canEditComment = (post) => {
-    return Boolean(post?.can_edit);
+    return !this.writesDisabled && Boolean(post?.can_edit);
   };
 
   canDeleteComment = (post) => {
-    return Boolean(post?.can_delete);
+    return !this.writesDisabled && Boolean(post?.can_delete);
   };
 
   canFlagComment = (post) => {
@@ -545,7 +565,9 @@ export default class VideoShortsCommentsSurface extends Component {
   }
 
   get canCreatePost() {
-    return Boolean(this.currentUser && this.item?.actions?.can_reply);
+    return Boolean(
+      !this.writesDisabled && this.currentUser && this.item?.actions?.can_reply,
+    );
   }
 
   get trimmedReply() {
@@ -650,40 +672,25 @@ export default class VideoShortsCommentsSurface extends Component {
 
       const response = await fetchVideoShortsComments({
         postId: item.post_id,
-        after: append ? this.nextAfter : null,
+        cursor: append ? this.nextAfter : null,
       });
 
       if (this.isStale(token)) {
         return;
       }
 
-      const comments = this.commentsWithoutLoadedChildren(response.comments);
-
-      const existingIds = append
-        ? new Set(this.comments.map((comment) => comment.id))
-        : null;
-      const deduped = append
-        ? comments.filter((comment) => !existingIds.has(comment.id))
-        : comments;
-
-      if (!append) {
-        this.childRepliesByPostId = {};
-        this.expandedReplyPostIds = {};
-        this.loadingReplyPostIds = {};
-        this.replyErrorsByPostId = {};
-        this.replyPaginationByPostId = {};
-        this.loadingReplyPromisesByPostId = {};
-      }
-
-      this.comments = append ? [...this.comments, ...deduped] : deduped;
-      this.hasDeletedPlaceholderContext =
-        this.hasDeletedPlaceholderContext || this.comments.some(isDeletedPlaceholder);
+      this.applySnapshotComments(response.comments, append);
       this.hasMore = response.hasMore;
-      this.nextAfter = response.nextAfter;
-      this.syncLoadedReplyCount();
+      this.nextAfter = response.nextCursor;
+      this.changeCursor = response.changeCursor || this.changeCursor;
+      this.setAbsoluteReplyCount(response.visibleReplyCount);
     } catch (error) {
       if (!this.isStale(token)) {
-        this.error = error;
+        if (error?.jqXHR?.status === 403 || error?.jqXHR?.status === 404) {
+          this.handleAuthorizationRevoked();
+        } else {
+          this.error = error;
+        }
       }
     } finally {
       if (!this.isStale(token)) {
@@ -691,6 +698,274 @@ export default class VideoShortsCommentsSurface extends Component {
         this.loadingMore = false;
       }
     }
+  }
+
+  startCommentSession() {
+    const routeSessionOwner = this.args.routeSessionOwner;
+    const subscribeRealtime = routeSessionOwner
+      ? (sourcePostId, callback) =>
+          routeSessionOwner.subscribeRealtime(sourcePostId, callback)
+      : (sourcePostId, callback) =>
+          this.videoShortsRealtime.subscribe(sourcePostId, callback);
+    const openAuthorizationLease = routeSessionOwner
+      ? (sourcePostId, onRevoked) =>
+          routeSessionOwner.openAuthorizationLease(sourcePostId, onRevoked)
+      : (sourcePostId, onRevoked) =>
+          this.videoShortsAuthorizationLease.open(sourcePostId, onRevoked);
+
+    this.unsubscribeRealtime = subscribeRealtime(
+      this.activePostId,
+      (invalidation) => {
+        if (Number(invalidation.source_post_id) === Number(this.activePostId)) {
+          this.drainDeltas();
+        }
+      },
+    );
+
+    this.releaseAuthorizationLease = openAuthorizationLease(
+      this.activePostId,
+      () => this.handleAuthorizationRevoked(),
+    );
+
+    if (!routeSessionOwner) {
+      const revalidate = () =>
+        this.videoShortsAuthorizationLease.revalidate();
+      document.addEventListener("visibilitychange", revalidate);
+      window.addEventListener("focus", revalidate);
+      window.addEventListener("online", revalidate);
+      this.sessionListeners = () => {
+        document.removeEventListener("visibilitychange", revalidate);
+        window.removeEventListener("focus", revalidate);
+        window.removeEventListener("online", revalidate);
+      };
+    }
+  }
+
+  stopCommentSession() {
+    this.unsubscribeRealtime?.();
+    this.unsubscribeRealtime = null;
+    this.releaseAuthorizationLease?.();
+    this.releaseAuthorizationLease = null;
+    this.sessionListeners?.();
+    this.sessionListeners = null;
+    clearTimeout(this.deltaRetryTimer);
+    this.deltaRetryTimer = null;
+    this.deltaRetryAttempt = 0;
+    this.deltaDrainRequested = false;
+  }
+
+  setAbsoluteReplyCount(count) {
+    if (!Number.isFinite(count)) {
+      return;
+    }
+
+    this.localReplyCount = count;
+    this.emitCommentMutation({
+      type: "sync-count",
+      countDelta: 0,
+      replyCountValue: count,
+    });
+  }
+
+  allLoadedComments() {
+    let comments = [];
+    const visit = (items) => {
+      for (let comment of items) {
+        comments.push(comment);
+        visit(this.childRepliesFor(comment));
+      }
+    };
+    visit(this.comments);
+    return comments;
+  }
+
+  applySnapshotComments(snapshotComments, append) {
+    let byId = new Map();
+    if (append) {
+      for (let comment of this.allLoadedComments()) {
+        byId.set(postKey(comment), comment);
+      }
+    }
+
+    for (let comment of snapshotComments) {
+      byId.set(postKey(comment), normalizeComment(comment));
+    }
+
+    this.rebuildCommentTree([...byId.values()]);
+  }
+
+  rebuildCommentTree(flatComments) {
+    let sourcePostNumber = Number(this.item?.post_number);
+    let byPostNumber = new Map(
+      flatComments.map((comment) => [Number(comment.post_number), comment]),
+    );
+    let children = {};
+    let roots = [];
+
+    for (let comment of flatComments) {
+      let parent = byPostNumber.get(Number(comment.reply_to_post_number));
+      if (parent && Number(comment.reply_to_post_number) !== sourcePostNumber) {
+        let parentKey = postKey(parent);
+        children[parentKey] = [...(children[parentKey] || []), { ...comment, replies: [] }];
+      } else {
+        roots.push({ ...comment, replies: [] });
+      }
+    }
+
+    this.comments = roots;
+    this.childRepliesByPostId = children;
+    this.hasDeletedPlaceholderContext = roots.some(isDeletedPlaceholder);
+  }
+
+  async drainDeltas() {
+    if (this.drainingDeltas) {
+      this.deltaDrainRequested = true;
+      return;
+    }
+
+    if (!this.changeCursor || this.writesDisabled) {
+      return;
+    }
+
+    this.drainingDeltas = true;
+    this.deltaDrainRequested = false;
+    const token = this.loadToken;
+    const sourcePostId = this.activePostId;
+
+    try {
+      do {
+        let response = await fetchVideoShortsCommentDelta({
+          postId: sourcePostId,
+          since: this.changeCursor,
+        });
+        if (
+          this.isStale(token) ||
+          Number(sourcePostId) !== Number(this.activePostId)
+        ) {
+          return;
+        }
+
+        this.applyDeltaChanges(response.changes);
+        this.changeCursor = response.nextChangeCursor;
+        this.setAbsoluteReplyCount(response.visibleReplyCount);
+        this.deltaRetryAttempt = 0;
+        if (!response.hasMore) {
+          break;
+        }
+      } while (this.changeCursor);
+    } catch (error) {
+      if (this.isStale(token)) {
+        return;
+      }
+
+      if (isDeltaExpired(error)) {
+        try {
+          await this.reconcileExpiredDelta(token);
+        } catch (reconciliationError) {
+          if (
+            reconciliationError?.jqXHR?.status === 403 ||
+            reconciliationError?.jqXHR?.status === 404
+          ) {
+            this.handleAuthorizationRevoked();
+          } else {
+            this.writesDisabled = false;
+            this.error = reconciliationError;
+            this.scheduleDeltaRetry();
+          }
+        }
+      } else if (
+        error?.jqXHR?.status === 403 ||
+        error?.jqXHR?.status === 404
+      ) {
+        this.handleAuthorizationRevoked();
+      } else {
+        this.scheduleDeltaRetry();
+      }
+    } finally {
+      this.drainingDeltas = false;
+      if (this.deltaDrainRequested) {
+        this.deltaDrainRequested = false;
+        this.drainDeltas();
+      }
+    }
+  }
+
+  scheduleDeltaRetry() {
+    clearTimeout(this.deltaRetryTimer);
+    let delay = Math.min(250 * 2 ** this.deltaRetryAttempt, 5000);
+    this.deltaRetryAttempt += 1;
+    this.deltaRetryTimer = setTimeout(() => this.drainDeltas(), delay);
+  }
+
+  applyDeltaChanges(changes) {
+    let byId = new Map(
+      this.allLoadedComments().map((comment) => [postKey(comment), comment])
+    );
+
+    for (let change of changes) {
+      let changedComment = change.comment || change;
+      let key =
+        postKey(changedComment) ||
+        String(change.tombstone?.id || change.changed_post_id || "");
+
+      if (!key) {
+        continue;
+      }
+
+      if (change.deleted || change.tombstone) {
+        byId.delete(key);
+      } else {
+        byId.set(key, normalizeComment(changedComment));
+      }
+    }
+
+    this.rebuildCommentTree([...byId.values()]);
+  }
+
+  async reconcileExpiredDelta(token = this.loadToken) {
+    this.writesDisabled = true;
+    const sourcePostId = this.activePostId;
+    let cursor = null;
+    let allComments = [];
+    do {
+      let response = await fetchVideoShortsComments({
+        postId: sourcePostId,
+        cursor,
+      });
+      if (
+        this.isStale(token) ||
+        Number(sourcePostId) !== Number(this.activePostId)
+      ) {
+        return;
+      }
+
+      allComments.push(...response.comments);
+      cursor = response.hasMore ? response.nextCursor : null;
+      this.changeCursor = response.changeCursor || this.changeCursor;
+      this.setAbsoluteReplyCount(response.visibleReplyCount);
+    } while (cursor);
+
+    if (this.isStale(token)) {
+      return;
+    }
+
+    this.rebuildCommentTree(allComments);
+    this.error = null;
+    this.writesDisabled = false;
+  }
+
+  handleAuthorizationRevoked() {
+    this.loadToken += 1;
+    this.writesDisabled = true;
+    this.comments = [];
+    this.childRepliesByPostId = {};
+    this.localReplyCount = 0;
+    this.resetReplyState();
+    this.resetCommentReplyState();
+    this.resetEditingState();
+    this.stopCommentSession();
+    this.args.onAuthorizationRevoked?.();
+    this.dialog.alert(i18n("video_shorts.comments.load_error"));
   }
 
   commentsWithoutLoadedChildren(comments = []) {
@@ -950,40 +1225,36 @@ export default class VideoShortsCommentsSurface extends Component {
       return currentChildren;
     }
 
-    try {
-      const response = await fetchVideoShortsComments({
-        postId: comment.post_id,
-      });
+    const response = await fetchVideoShortsComments({
+      postId: comment.post_id,
+    });
 
-      const children = this.uniqueReplies([
-        ...this.commentsWithoutLoadedChildren(response.comments),
-        ...currentChildren,
-        ...this.loadedFlatChildrenFor(comment),
-      ]);
+    const children = this.uniqueReplies([
+      ...this.commentsWithoutLoadedChildren(response.comments),
+      ...currentChildren,
+      ...this.loadedFlatChildrenFor(comment),
+    ]);
 
-      if (key) {
-        this.childRepliesByPostId = {
-          ...this.childRepliesByPostId,
-          [key]: children,
-        };
-        this.expandedReplyPostIds = {
-          ...this.expandedReplyPostIds,
-          [key]: true,
-        };
-        this.replyPaginationByPostId = {
-          ...this.replyPaginationByPostId,
-          [key]: {
-            hasMore: response.hasMore,
-            nextAfter: response.nextAfter,
-          },
-        };
-        this.updateReplyBranchComment(comment, children);
-      }
-
-      return children;
-    } catch {
-      return currentChildren;
+    if (key) {
+      this.childRepliesByPostId = {
+        ...this.childRepliesByPostId,
+        [key]: children,
+      };
+      this.expandedReplyPostIds = {
+        ...this.expandedReplyPostIds,
+        [key]: true,
+      };
+      this.replyPaginationByPostId = {
+        ...this.replyPaginationByPostId,
+        [key]: {
+          hasMore: response.hasMore,
+          nextAfter: response.nextAfter,
+        },
+      };
+      this.updateReplyBranchComment(comment, children);
     }
+
+    return children;
   }
 
   emitCommentMutation(mutation) {
@@ -1771,15 +2042,6 @@ export default class VideoShortsCommentsSurface extends Component {
       message: i18n("video_shorts.comments.delete_confirm"),
       didConfirm: async () => {
         this.deletingPostId = postKey(comment);
-        const sourcePostNumber = Number(this.item?.post_number || 0);
-        const replyToPostNumber = Number(comment?.reply_to_post_number || 0);
-        const isNestedReply =
-          Boolean(sourcePostNumber) &&
-          Boolean(replyToPostNumber) &&
-          replyToPostNumber !== sourcePostNumber;
-        const hasDeletedPlaceholders =
-          this.hasDeletedPlaceholderContext ||
-          this.deletedPlaceholdersForRefresh().length > 0;
 
         try {
           const childrenSnapshot = await this.childrenSnapshotForDelete(comment);
@@ -1789,13 +2051,6 @@ export default class VideoShortsCommentsSurface extends Component {
           await deleteVideoShortsComment(comment.post_id);
           const mutation = this.removeComment(comment, { childrenSnapshot });
           this.emitCommentMutation(mutation);
-          if (
-            !mutation.keptPlaceholder &&
-            !hasDeletedPlaceholders &&
-            !isNestedReply
-          ) {
-            await this.refreshCommentsAfterMutation();
-          }
         } catch (error) {
           popupAjaxError(error);
         } finally {

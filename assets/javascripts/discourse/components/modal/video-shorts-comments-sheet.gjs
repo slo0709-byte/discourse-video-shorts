@@ -184,10 +184,12 @@ export default class VideoShortsCommentsSheet extends Component {
         >
           <VideoShortsCommentsSurface
             @item={{this.item}}
+            @routeSessionOwner={{@model.routeSessionOwner}}
             @replyCount={{this.replyCount}}
             @onReplyPublished={{this.handleReplyPublished}}
             @onCommentDeleted={{this.handleCommentDeleted}}
             @onCommentMutation={{this.handleCommentMutation}}
+            @onAuthorizationRevoked={{this.close}}
           />
         </div>
       </:body>

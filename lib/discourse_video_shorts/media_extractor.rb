@@ -1,384 +1,246 @@
 # frozen_string_literal: true
 
 require "cgi"
-require "digest"
 require "nokogiri"
+require "openssl"
 require "uri"
+require_relative "media/origin_policy"
 
 module DiscourseVideoShorts
   class MediaExtractor
-    VIDEO_EXTENSIONS = %w[mp4 webm mov m4v].freeze
-    HLS_EXTENSION = "m3u8"
-    BILIBILI_HOSTS = %w[www.bilibili.com bilibili.com].freeze
-    BILIBILI_PLAYER_HOST = "player.bilibili.com"
-    YOUTUBE_EMBED_HOSTS = %w[www.youtube.com www.youtube-nocookie.com].freeze
-    VIMEO_EMBED_HOST = "player.vimeo.com"
+    BILIBILI_HOSTS = %w[bilibili.com www.bilibili.com player.bilibili.com].freeze
     BVID_PATTERN = /\ABV[0-9A-Za-z]{10}\z/
+    YOUTUBE_HOSTS = %w[m.youtube.com www.youtube.com youtube.com].freeze
+    YOUTUBE_ID_PATTERN = /\A[A-Za-z0-9_-]{11}\z/
 
     class << self
-      def extract_media_for_visible_post(post, guardian)
-        new(post, guardian).extract
+      def extract_media_for_visible_post(post, guardian, policy_snapshot: nil)
+        new(post, guardian, policy_snapshot:).extract
       end
     end
 
-    def initialize(post, guardian)
+    def initialize(post, guardian, policy_snapshot: nil)
       @post = post
       @guardian = guardian
+      @policy_snapshot = policy_snapshot
     end
 
     def extract
-      native_upload_descriptor || hls_descriptor || bilibili_canonical_descriptor ||
-        bilibili_iframe_descriptor || youtube_vimeo_iframe_descriptor || raw_known_provider_descriptor ||
-        unsupported_intended_video_descriptor
+      uploaded_mp4_descriptor || provider_descriptor || external_media_descriptor || invalid_media_descriptor
     end
 
     private
 
-    attr_reader :post, :guardian
+    attr_reader :post, :guardian, :policy_snapshot
 
-    def native_upload_descriptor
-      upload = post.uploads.find { |candidate| playable_upload_extension?(candidate.extension) }
-      return nil if upload.blank?
+    def uploaded_mp4_descriptor
+      upload = post.uploads.find { |candidate| playable_upload?(candidate) }
+      return nil unless upload
 
       {
-        provider: "native",
-        renderability: "native",
-        dedupe_key: "native:upload:#{upload.id}",
-        upload: {
-          id: upload.id,
-          sha1: upload.sha1,
-          extension: upload.extension,
-          original_filename: upload.original_filename,
-          filesize: upload.filesize,
-          secure: upload.secure?,
-        },
+        kind: "upload_mp4",
+        identity: "v1:upload:#{upload.id}:#{upload.sha1}",
+        url: authorized_upload_url(upload),
+        required_origins: [],
+        policy_revision: nil,
+        fallback_reason: nil,
       }
     end
 
-    def hls_descriptor
-      unsupported_candidate_urls.each do |url|
-        uri = parse_http_url(url)
-        next if uri.blank?
-        next if !hls_path?(uri.path)
+    def provider_descriptor
+      candidate_urls.each do |url|
+        uri = parse_url(url)
+        next unless uri
 
-        normalized_url = normalized_scheme_host_path(uri)
-        return hls_invalid_descriptor(normalized_url) if uri.scheme != "https"
+        descriptor = bilibili_descriptor(uri) || youtube_descriptor(uri)
+        return descriptor if descriptor
+      end
+      nil
+    end
+
+    def bilibili_descriptor(uri)
+      return nil if BILIBILI_HOSTS.exclude?(uri.host)
+      return fallback("bilibili", "invalid_bilibili_url", uri.to_s) unless uri.scheme == "https"
+
+      bvid =
+        if uri.host == "player.bilibili.com" && uri.path == "/player.html"
+          Rack::Utils.parse_nested_query(uri.query.to_s)["bvid"]
+        else
+          uri.path.match(%r{\A/video/([^/]+)/?\z})&.captures&.first
+        end
+      return fallback("bilibili", "invalid_bilibili_url", uri.to_s) unless bvid&.match?(BVID_PATTERN)
+
+      {
+        kind: "bilibili",
+        identity: "v1:bilibili:#{bvid}",
+        url: "https://player.bilibili.com/player.html?bvid=#{bvid}&page=1",
+        required_origins: [],
+        policy_revision: nil,
+        fallback_reason: nil,
+      }
+    end
+
+    def youtube_descriptor(uri)
+      video_id = youtube_video_id(uri)
+      return nil unless video_id || youtube_host?(uri.host)
+      return fallback("youtube", "invalid_youtube_url", uri.to_s) unless uri.scheme == "https" && video_id
+
+      {
+        kind: "youtube",
+        identity: "v1:youtube:#{video_id}",
+        url: "https://www.youtube.com/embed/#{video_id}",
+        required_origins: [],
+        policy_revision: nil,
+        fallback_reason: nil,
+      }
+    end
+
+    def external_media_descriptor
+      candidate_urls.each do |url|
+        uri = parse_url(url)
+        next unless uri
+
+        kind = external_kind(uri)
+        next unless kind
+        return fallback(kind, "https_required", uri.to_s) unless uri.scheme == "https"
+
+        playback_url = url_without_fragment(uri)
+        origin_policy = Media::OriginPolicy.new(snapshot: current_policy_snapshot)
+        origin = origin_policy.authorize!(playback_url)
 
         return {
-          provider: "hls",
-          renderability: "hls",
-          hls_url: url_without_fragment(uri),
-          dedupe_key: "hls:#{sha256(normalized_url)}",
+          kind:,
+          identity: external_identity(kind, playback_url),
+          url: playback_url,
+          required_origins: [origin],
+          policy_revision: origin_policy.revision,
+          fallback_reason: nil,
         }
+      rescue Media::OriginPolicy::Denied => error
+        return fallback(kind || "external", error.message, url)
       end
-
       nil
     end
 
-    def hls_invalid_descriptor(normalized_url)
-      {
-        provider: "hls",
-        renderability: "fallback",
-        fallback: "post",
-        fallback_reason: "hls_requires_https",
-        dedupe_key: "hls:invalid:#{sha256(normalized_url)}",
-      }
-    end
-
-    def bilibili_canonical_descriptor
+    def invalid_media_descriptor
       raw_urls.each do |url|
-        uri = parse_http_url(url)
-        next if uri.blank?
-        next if BILIBILI_HOSTS.exclude?(uri.host)
-
-        bvid = bilibili_bvid_from_canonical_path(uri.path)
-        return bilibili_invalid_descriptor(uri) if bvid.blank?
-
-        return bilibili_iframe_candidate_descriptor(bvid: bvid, page: 1)
+        uri = parse_url(url)
+        return fallback("external", "invalid_media_url", url) if uri.nil? && url.start_with?("http")
       end
+      nil
+    end
+
+    def current_policy_snapshot
+      return policy_snapshot if policy_snapshot
+      return DiscourseVideoShorts::Policy::Snapshot.current if defined?(DiscourseVideoShorts::Policy::Snapshot)
+
+      raise Media::OriginPolicy::Denied, "missing_policy_snapshot"
+    end
+
+    def youtube_video_id(uri)
+      candidate =
+        if uri.host == "youtu.be"
+          uri.path.delete_prefix("/").split("/").first if uri.path.match?(%r{\A/[^/]+/?\z})
+        elsif YOUTUBE_HOSTS.include?(uri.host) && uri.path == "/watch"
+          Rack::Utils.parse_nested_query(uri.query.to_s)["v"]
+        elsif YOUTUBE_HOSTS.include?(uri.host) && uri.path.match?(%r{\A/(?:shorts|embed)/[^/]+/?\z})
+          uri.path.split("/").last
+        end
+      candidate if candidate&.match?(YOUTUBE_ID_PATTERN)
+    end
+
+    def youtube_host?(host)
+      YOUTUBE_HOSTS.include?(host) || host == "youtu.be"
+    end
+
+
+    def external_kind(uri)
+      extension = File.extname(uri.path.to_s).delete_prefix(".").downcase
+      return "external_mp4" if extension == "mp4"
+      return "external_hls" if extension == "m3u8"
 
       nil
     end
 
-    def bilibili_iframe_descriptor
-      iframe_urls.each do |url|
-        uri = parse_http_url(url)
-        next if uri.blank?
-        next if uri.host != BILIBILI_PLAYER_HOST
+    def authorized_upload_url(upload)
+      UrlHelper.cook_url(upload.url, secure: upload.secure?, local: true)
+    end
 
-        return bilibili_player_descriptor(uri)
+
+    def playable_upload?(upload)
+      upload.extension.to_s.delete_prefix(".").downcase == "mp4" && authorized_upload_extensions.include?("mp4")
+    end
+
+    def authorized_upload_extensions
+      extensions = setting_extensions(SiteSetting.authorized_extensions)
+      if guardian.user&.staff?
+        staff_extensions = SiteSetting.authorized_extensions_for_staff.to_s
+        return Set["mp4"] if staff_extensions.split("|").include?("*")
+
+        extensions |= setting_extensions(staff_extensions)
       end
-
-      nil
+      extensions
     end
 
-    def youtube_vimeo_iframe_descriptor
-      iframe_urls.each do |url|
-        uri = parse_http_url(url)
-        next if uri.blank?
-
-        descriptor = youtube_iframe_descriptor(uri) || vimeo_iframe_descriptor(uri)
-        return descriptor if descriptor.present?
-      end
-
-      nil
+    def setting_extensions(value)
+      value.to_s.gsub(/[\s.]+/, "").downcase.split("|").to_set
     end
 
-    def raw_known_provider_descriptor
-      raw_urls.each do |url|
-        uri = parse_http_url(url)
-        next if uri.blank?
-
-        youtube_descriptor = raw_youtube_descriptor(uri)
-        return youtube_descriptor if youtube_descriptor.present?
-        return raw_provider_fallback("vimeo", uri) if raw_vimeo_url?(uri)
-      end
-
-      nil
-    end
-
-    def unsupported_intended_video_descriptor
-      unsupported_candidate_urls.each do |url|
-        uri = parse_http_url(url)
-        next if uri.blank?
-        next if supported_provider_host?(uri.host)
-        next if !video_path?(uri.path)
-
-        normalized_url = normalized_scheme_host_path(uri)
-        return {
-          provider: "unsupported",
-          renderability: "fallback",
-          fallback: "post",
-          fallback_reason: "unsupported_intended_video",
-          normalized_url: normalized_url,
-          dedupe_key: "unsupported:#{sha256(normalized_url)}",
-        }
-      end
-
-      nil
-    end
-
-    def bilibili_player_descriptor(uri)
-      return bilibili_invalid_descriptor(uri) if uri.scheme != "https"
-      return bilibili_invalid_descriptor(uri) if uri.path != "/player.html"
-
-      params = Rack::Utils.parse_nested_query(uri.query)
-      bvid = params["bvid"].to_s
-      return bilibili_invalid_descriptor(uri) if bvid !~ BVID_PATTERN
-
-      page = positive_integer_string?(params["page"]) ? params["page"].to_i : 1
-      bilibili_iframe_candidate_descriptor(bvid: bvid, page: page)
-    end
-
-    def bilibili_iframe_candidate_descriptor(bvid:, page:)
-      {
-        provider: "bilibili",
-        renderability: "iframe_candidate",
-        embed_url: "https://player.bilibili.com/player.html?bvid=#{bvid}&page=#{page}",
-        dedupe_key: "bilibili:#{bvid}:page:#{page}",
-      }
-    end
-
-    def bilibili_invalid_descriptor(uri)
-      normalized_url = normalized_scheme_host_path(uri)
-      {
-        provider: "bilibili",
-        renderability: "fallback",
-        fallback: "post",
-        fallback_reason: "invalid_bilibili_url",
-        dedupe_key: "bilibili:invalid:#{sha256(normalized_url)}",
-      }
-    end
-
-    def youtube_iframe_descriptor(uri)
-      return raw_provider_fallback("youtube", uri) if raw_youtube_iframe_host?(uri.host)
-      return nil if YOUTUBE_EMBED_HOSTS.exclude?(uri.host)
-      return raw_provider_fallback("youtube", uri) if uri.scheme != "https"
-
-      match = uri.path.match(%r{\A/embed/([^/?#]+)\z})
-      return raw_provider_fallback("youtube", uri) if match.blank?
-
-      video_id = match[1]
-      return raw_provider_fallback("youtube", uri) if video_id.blank?
-
-      {
-        provider: "youtube",
-        renderability: "iframe_candidate",
-        embed_url: "https://#{uri.host}/embed/#{video_id}",
-        dedupe_key: "youtube:#{video_id}",
-      }
-    end
-
-    def vimeo_iframe_descriptor(uri)
-      return nil if uri.host != VIMEO_EMBED_HOST
-      return raw_provider_fallback("vimeo", uri) if uri.scheme != "https"
-
-      match = uri.path.match(%r{\A/video/([0-9]+)\z})
-      return raw_provider_fallback("vimeo", uri) if match.blank?
-
-      video_id = match[1]
-      {
-        provider: "vimeo",
-        renderability: "iframe_candidate",
-        embed_url: "https://player.vimeo.com/video/#{video_id}",
-        dedupe_key: "vimeo:#{video_id}",
-      }
-    end
-
-    def raw_provider_fallback(provider, uri)
-      normalized_url = normalized_scheme_host_path(uri)
-      {
-        provider: provider,
-        renderability: "fallback",
-        fallback: "post",
-        fallback_reason: "#{provider}_raw_url_unrenderable_v1",
-        dedupe_key: "#{provider}:raw:#{sha256(normalized_url)}",
-      }
-    end
-
-    def raw_youtube_descriptor(uri)
-      return nil if !raw_youtube_url?(uri)
-
-      video_id = raw_youtube_video_id(uri)
-      return raw_provider_fallback("youtube", uri) if video_id.blank?
-
-      {
-        provider: "youtube",
-        renderability: "iframe_candidate",
-        embed_url: "https://www.youtube.com/embed/#{video_id}",
-        dedupe_key: "youtube:#{video_id}",
-      }
-    end
-
-    def raw_youtube_video_id(uri)
-      if uri.host == "youtu.be"
-        return uri.path.delete_prefix("/").split("/").first.presence
-      end
-
-      if uri.path.start_with?("/shorts/")
-        return uri.path.delete_prefix("/shorts/").split("/").first.presence
-      end
-
-      Rack::Utils.parse_nested_query(uri.query)["v"].presence if uri.path.start_with?("/watch")
-    end
-
-    def bilibili_bvid_from_canonical_path(path)
-      match = path.to_s.match(%r{\A/video/([^/]+)/?\z})
-      return nil if match.blank?
-
-      bvid = match[1]
-      bvid if bvid.match?(BVID_PATTERN)
+    def candidate_urls
+      @candidate_urls ||= (raw_urls + cooked_urls).uniq
     end
 
     def raw_urls
       @raw_urls ||= extract_urls(post.raw.to_s)
     end
 
-    def unsupported_candidate_urls
-      @unsupported_candidate_urls ||= (raw_urls + anchor_urls).uniq
-    end
-
-    def iframe_urls
-      @iframe_urls ||=
-        [post.cooked.to_s, decoded_html(post.cooked.to_s), post.raw.to_s, decoded_html(post.raw.to_s)]
-          .flat_map { |html| html_fragment(html).css("iframe[src]").map { |iframe| iframe["src"] } }
-          .compact
-          .uniq
-    end
-
-    def anchor_urls
-      @anchor_urls ||=
-        html_fragment(post.cooked.to_s).css("a[href]").map { |anchor| anchor["href"] }.compact.uniq
+    def cooked_urls
+      @cooked_urls ||=
+        html_fragment(post.cooked.to_s).css("a[href], iframe[src]").filter_map do |element|
+          element["href"] || element["src"]
+        end.uniq
     end
 
     def extract_urls(text)
       text.scan(%r{https?://[^\s<>"')]+}).map { |url| url.delete_suffix(".") }.uniq
     end
 
-    def html_fragment(html)
-      Nokogiri::HTML5.fragment(html)
-    end
-
-    def decoded_html(html)
-      CGI.unescapeHTML(html)
-    end
-
-    def parse_http_url(url)
+    def parse_url(url)
       uri = URI.parse(url.to_s)
-      return nil if %w[http https].exclude?(uri.scheme)
-      return nil if uri.host.blank?
+      return nil unless uri.is_a?(URI::HTTP) && uri.host.present?
+      return nil if uri.userinfo.present?
 
+      uri.host = uri.host.downcase
       uri
     rescue URI::InvalidURIError
       nil
     end
 
-    def raw_youtube_url?(uri)
-      %w[www.youtube.com youtube.com m.youtube.com youtu.be].include?(uri.host) &&
-        (uri.path.start_with?("/watch") || uri.path.start_with?("/shorts/") || uri.host == "youtu.be")
-    end
-
-    def raw_youtube_iframe_host?(host)
-      %w[youtube.com m.youtube.com youtu.be].include?(host)
-    end
-
-    def raw_vimeo_url?(uri)
-      uri.host == "vimeo.com" && uri.path.match?(%r{\A/[0-9]+/?\z})
-    end
-
-    def supported_provider_host?(host)
-      BILIBILI_HOSTS.include?(host) || host == BILIBILI_PLAYER_HOST ||
-        YOUTUBE_EMBED_HOSTS.include?(host) || host == "youtube.com" || host == "m.youtube.com" ||
-        host == "youtu.be" || host == VIMEO_EMBED_HOST || host == "vimeo.com"
-    end
-
-    def normalized_scheme_host_path(uri)
-      "#{uri.scheme.downcase}://#{uri.host.downcase}#{uri.path}"
-    end
-
-    def video_path?(path)
-      extension = File.extname(path.to_s).delete_prefix(".").downcase
-      VIDEO_EXTENSIONS.include?(extension)
-    end
-
-    def hls_path?(path)
-      File.extname(path.to_s).delete_prefix(".").downcase == HLS_EXTENSION
-    end
-
-    def playable_upload_extension?(extension)
-      normalized_extension = extension.to_s.delete_prefix(".").downcase
-      VIDEO_EXTENSIONS.include?(normalized_extension) &&
-        authorized_upload_extensions.include?(normalized_extension)
-    end
-
-    def authorized_upload_extensions
-      extensions = setting_extensions(SiteSetting.authorized_extensions)
-
-      if guardian.user&.staff?
-        return VIDEO_EXTENSIONS.to_set if SiteSetting.authorized_extensions_for_staff.include?("*")
-
-        extensions |= setting_extensions(SiteSetting.authorized_extensions_for_staff)
-      end
-
-      extensions
-    end
-
-    def setting_extensions(value)
-      value.to_s.gsub(/[\s.]+/, "").downcase.split("|").reject { |extension| extension.include?("*") }.to_set
+    def html_fragment(html)
+      Nokogiri::HTML5.fragment(CGI.unescapeHTML(html))
     end
 
     def url_without_fragment(uri)
-      uri = uri.dup
-      uri.fragment = nil
-      uri.to_s
+      normalized = uri.dup
+      normalized.fragment = nil
+      normalized.to_s
     end
 
-    def positive_integer_string?(value)
-      value.to_s.match?(/\A[1-9][0-9]*\z/)
+    def fallback(kind, reason, value)
+      {
+        kind: "fallback",
+        identity: external_identity("#{kind}:#{reason}", value),
+        url: nil,
+        required_origins: [],
+        policy_revision: nil,
+        fallback_reason: reason,
+      }
     end
 
-    def sha256(value)
-      Digest::SHA256.hexdigest(value)
+    def external_identity(kind, value)
+      secret = Rails.application.secret_key_base
+      digest = OpenSSL::HMAC.hexdigest("SHA256", secret, "discourse-video-shorts:v1:#{kind}:#{value}")
+      "v1:external:#{digest}"
     end
   end
 end

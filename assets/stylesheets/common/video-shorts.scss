@@ -39,8 +39,7 @@
 }
 
 .video-shorts-error,
-.video-shorts-empty,
-.video-shorts-continuation {
+.video-shorts-empty {
   max-width: 760px;
   margin: 1rem auto;
   padding: 0.75rem 1rem;
@@ -252,9 +251,9 @@
 .video-shorts-action-rail__button {
   display: grid;
   place-items: center;
-  width: var(--video-shorts-control-size);
-  min-width: var(--video-shorts-control-size);
-  min-height: var(--video-shorts-control-size);
+  width: 44px;
+  min-width: 44px;
+  min-height: 44px;
   padding: 0.25rem;
   border: 0;
   border-radius: 999px;
@@ -967,13 +966,12 @@ body.video-shorts-route
 @media (width >= 1024px) {
   .video-shorts-feed {
     --video-shorts-feed-height: calc(100dvh - var(--header-offset, 4em));
-    --video-shorts-desktop-metadata-bottom: clamp(3.5rem, 7vh, 4.75rem);
+    --video-shorts-desktop-metadata-bottom: clamp(3rem, 6vh, 4rem);
     --video-shorts-stage-max-height: min(
       100%,
       calc(var(--video-shorts-feed-height) - 2rem)
     );
     --video-shorts-stage-width: min(
-      100%,
       440px,
       calc(var(--video-shorts-stage-max-height) * 9 / 16)
     );
@@ -1042,7 +1040,8 @@ body.video-shorts-route
 
   .video-shorts-item__stage {
     min-width: 0;
-    max-height: var(--video-shorts-stage-max-height);
+    height: calc(var(--video-shorts-stage-width) * 16 / 9);
+    max-height: none;
     border-radius: var(--video-shorts-radius-lg);
     background: #000;
     box-shadow: var(--video-shorts-shadow-stage);
@@ -1059,13 +1058,10 @@ body.video-shorts-route
   }
 
   .video-shorts-feed__viewport[data-comments-open="true"] .video-shorts-item {
-    --video-shorts-stage-width: max(
-      260px,
-      min(
-        calc(100% - 70px),
-        400px,
-        calc(var(--video-shorts-stage-max-height) * 9 / 16)
-      )
+    --video-shorts-stage-width: min(
+      calc(100% - 70px),
+      400px,
+      calc(var(--video-shorts-stage-max-height) * 9 / 16)
     );
     grid-template-columns: var(--video-shorts-stage-width) 60px;
     grid-template-rows: auto;
@@ -1272,11 +1268,6 @@ body.video-shorts-route
     display: block !important;
   }
 
-  body.video-shorts-route #main-container,
-  body.video-shorts-route .card-cloak {
-    display: none !important;
-  }
-
   body.video-shorts-route #user-card,
   body.video-shorts-route #group-card {
     z-index: var(--video-shorts-z-user-card);
@@ -1387,7 +1378,9 @@ body.video-shorts-route
     body.video-shorts-route & .d-modal__container {
       position: fixed;
       width: 100%;
-      inset: auto 0 var(--video-shorts-comments-sheet-stable-bottom, 0);
+      right: 0;
+      bottom: var(--video-shorts-comments-sheet-stable-bottom, 0);
+      left: 0;
       top: var(--video-shorts-comments-sheet-stable-top, auto);
       flex: 0 1 auto;
       align-self: flex-end;

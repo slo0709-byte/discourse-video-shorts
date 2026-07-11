@@ -1,65 +1,66 @@
 # frozen_string_literal: true
 
-require 'digest'
-require 'json'
+require "digest"
+require "json"
 
 module DiscourseVideoShorts
   class MediaExtractorCache
-    CUSTOM_FIELD = 'discourse_video_shorts_media_cache_v1'
-    VERSION = 1
+    VERSION = 2
+    CACHE_TTL = 1.day
+    CACHE_KEY_PREFIX = "discourse-video-shorts:media:"
 
     class << self
-      def extract_media_for_visible_post(post, guardian)
-        new(post, guardian).extract
-      end
-
-      def invalidate(post)
-        return if post.blank?
-
-        post.custom_fields.delete(CUSTOM_FIELD)
-        post.save_custom_fields(true)
+      def extract_media_for_visible_post(post, guardian, policy_snapshot:)
+        new(post, guardian, policy_snapshot:).extract
       end
     end
 
-    def initialize(post, guardian)
+    def initialize(post, guardian, policy_snapshot:)
       @post = post
       @guardian = guardian
+      @policy_snapshot = policy_snapshot
     end
 
     def extract
       cached = cached_descriptor
       return cached if cached.present?
 
-      descriptor = MediaExtractor.extract_media_for_visible_post(post, guardian)
+      descriptor =
+        MediaExtractor.extract_media_for_visible_post(
+          post,
+          guardian,
+          policy_snapshot: policy_snapshot,
+        )
       write_cache(descriptor) if descriptor.present?
       descriptor
     end
 
     private
 
-    attr_reader :post, :guardian
+    attr_reader :post, :guardian, :policy_snapshot
 
     def cached_descriptor
-      raw_payload = post.custom_fields[CUSTOM_FIELD]
+      raw_payload = Discourse.cache.read(cache_key)
       return nil if raw_payload.blank?
 
       payload = JSON.parse(raw_payload)
-      return nil if payload['version'] != VERSION
-      return nil if payload['signature'] != signature
+      return nil if payload["version"] != VERSION
+      return nil if payload["signature"] != signature
 
-      symbolize(payload['descriptor'])
+      symbolize(payload["descriptor"])
     rescue JSON::ParserError, TypeError
-      self.class.invalidate(post)
       nil
     end
 
     def write_cache(descriptor)
-      post.custom_fields[CUSTOM_FIELD] = JSON.generate(cache_payload(descriptor))
-      post.save_custom_fields(true)
+      Discourse.cache.write(cache_key, JSON.generate(cache_payload(descriptor)), expires_in: CACHE_TTL)
     end
 
     def signature
       @signature ||= Digest::SHA256.hexdigest(JSON.generate(signature_payload))
+    end
+    def cache_key
+      "#{CACHE_KEY_PREFIX}#{signature}"
     end
 
     def cache_payload(descriptor)
@@ -73,7 +74,8 @@ module DiscourseVideoShorts
         cooked: Digest::SHA256.hexdigest(post.cooked.to_s),
         uploads: upload_signature,
         settings: settings_signature,
-        staff: guardian.user&.staff? ? true : false
+        staff: guardian.user&.staff? ? true : false,
+        policy_revision: policy_snapshot.revision,
       }
     end
 
@@ -95,7 +97,7 @@ module DiscourseVideoShorts
     def settings_signature
       {
         authorized_extensions: SiteSetting.authorized_extensions.to_s,
-        authorized_extensions_for_staff: SiteSetting.authorized_extensions_for_staff.to_s
+        authorized_extensions_for_staff: SiteSetting.authorized_extensions_for_staff.to_s,
       }
     end
 

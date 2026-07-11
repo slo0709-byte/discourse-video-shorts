@@ -1,13 +1,13 @@
 plugins:
   video_shorts_enabled:
-    default: true
+    default: false
     client: true
   video_shorts_source_category_ids:
     default: ""
-    type: list
+    type: category_list
   video_shorts_source_tag_names:
     default: ""
-    type: list
+    type: tag_list
   video_shorts_excerpt_character_limit:
     default: 120
     min: 1
@@ -21,3 +21,7 @@ plugins:
   video_shorts_debug_mode:
     default: false
     client: false
+  video_shorts_canary_group_ids:
+    default: ""
+    type: group_list
+    allow_any: false

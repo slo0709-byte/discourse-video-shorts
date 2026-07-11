@@ -2,6 +2,7 @@ import Component from "@glimmer/component";
 import { tracked } from "@glimmer/tracking";
 import { on } from "@ember/modifier";
 import { action } from "@ember/object";
+import { next } from "@ember/runloop";
 import { service } from "@ember/service";
 import { modifier } from "ember-modifier";
 import { eq } from "discourse/truth-helpers";
@@ -14,38 +15,59 @@ import VideoShortsItem from "./item";
 
 export default class VideoShortsFeed extends Component {
   @service modal;
+  @service site;
+  @service router;
 
   @tracked activeIndex = 0;
   @tracked commentsOpen = false;
   @tracked selectedCommentsItem = null;
-  @tracked isDesktopLayout = false;
   @tracked replyCountOverrides = {};
+
   commentsOpener = null;
-  initialActivePostIdApplied = false;
+  initialActivePostIdApplied = undefined;
   restoringInitialActivePostId = false;
-
-  trackLayoutMode = modifier(() => {
-    const query = window.matchMedia("(min-width: 1024px)");
-    const update = () => {
-      this.isDesktopLayout = query.matches;
-    };
-
-    update();
-    query.addEventListener("change", update);
-
-    return () => query.removeEventListener("change", update);
-  });
+  mediaSessionOwner = {
+    registerPlayback: (owner) => this.registerPlayback(owner),
+  };
 
   applyInitialActivePostId = modifier(() => {
-    if (this.initialActivePostIdApplied) {
+    if (this.initialActivePostIdApplied === this.args.initialActivePostId) {
       return;
     }
 
-    this.initialActivePostIdApplied = true;
-    this.setActiveIndex(this.indexForPostId(this.args.initialActivePostId), {
-      center: true,
-      syncUrl: true,
+    const initialActivePostId = this.args.initialActivePostId;
+    const initialActiveIndex = this.indexForPostId(initialActivePostId);
+    this.initialActivePostIdApplied = initialActivePostId;
+
+    if (initialActiveIndex === this.activeIndex) {
+      if (this.args.requestedPostId && !initialActivePostId) {
+        next(() => {
+          if (!this.isDestroying && !this.isDestroyed) {
+            this.notifyActivePostId();
+          }
+        });
+      }
+      return;
+    }
+
+    next(() => {
+      if (this.isDestroying || this.isDestroyed) {
+        return;
+      }
+
+      this.setActiveIndex(initialActiveIndex, {
+        center: true,
+        syncUrl: Boolean(initialActivePostId),
+      });
     });
+  });
+
+  trackMediaPlayback = modifier(() => {
+    const pauseInactiveMedia = () => this.pauseInactiveMedia();
+    document.addEventListener("play", pauseInactiveMedia, true);
+
+    return () =>
+      document.removeEventListener("play", pauseInactiveMedia, true);
   });
 
   trackItemVisibility = modifier((element, [index]) => {
@@ -65,7 +87,7 @@ export default class VideoShortsFeed extends Component {
           this.setActiveIndex(index);
         }
       },
-      { root, threshold: [0.6] }
+      { root, threshold: [0.6] },
     );
 
     observer.observe(element);
@@ -74,7 +96,10 @@ export default class VideoShortsFeed extends Component {
   });
 
   centerOnInsert = modifier(() => {
-    requestAnimationFrame(() => this.centerActiveItem());
+    requestAnimationFrame(() => {
+      this.centerActiveItem();
+      this.requestMore();
+    });
   });
 
   isWithinPreloadWindow = (index) => {
@@ -111,6 +136,14 @@ export default class VideoShortsFeed extends Component {
       Boolean(args.initialActivePostId) && this.activeIndex > 0;
   }
 
+  willDestroy() {
+    super.willDestroy(...arguments);
+  }
+
+  get isDesktopLayout() {
+    return !this.site.mobileView;
+  }
+
   indexForPostId(postId) {
     const targetPostId = postId ? String(postId) : null;
 
@@ -119,7 +152,7 @@ export default class VideoShortsFeed extends Component {
     }
 
     const index = this.args.items?.findIndex(
-      (item) => String(item.post_id) === targetPostId
+      (item) => String(item.post_id) === targetPostId,
     );
 
     return index >= 0 ? index : 0;
@@ -129,7 +162,9 @@ export default class VideoShortsFeed extends Component {
     const postId = this.activeItem?.post_id;
 
     if (postId) {
-      this.args.onActivePostIdChange?.(postId);
+      this.router.replaceWith("videos", {
+        queryParams: { post_id: String(postId) },
+      });
     }
   }
 
@@ -141,31 +176,56 @@ export default class VideoShortsFeed extends Component {
     }
 
     const nextIndex = Math.max(0, Math.min(itemCount - 1, index));
+    const changed = nextIndex !== this.activeIndex;
 
     this.activeIndex = nextIndex;
 
-    if (syncUrl) {
+    if (syncUrl && changed) {
       this.notifyActivePostId();
     }
 
     if (center) {
       this.centerActiveItem();
     }
+    this.requestMore();
+    this.pauseInactiveMedia();
+  }
+
+  registerPlayback(owner) {
+    const unregister =
+      this.args.routeSessionOwner?.registerPlayback(owner) || (() => {});
+    let registered = true;
+
+    return () => {
+      if (!registered) {
+        return;
+      }
+
+      registered = false;
+      unregister();
+    };
   }
 
   
+  pauseInactiveMedia() {
+    const activeVideo = this.activeVideo();
 
-  
+    for (const video of document.querySelectorAll(
+      ".video-shorts-feed__items video"
+    )) {
+      if (video !== activeVideo) {
+        video.pause();
+      }
+    }
+  }
 
-  
+  requestMore() {
+    const itemCount = this.args.items?.length || 0;
 
-  
-
-  
-
-  
-
-  
+    if (this.activeIndex >= itemCount - 2) {
+      window.dispatchEvent(new CustomEvent("video-shorts:load-next"));
+    }
+  }
 
   get activeItemSelector() {
     return `[data-video-shorts-index="${this.activeIndex}"]`;
@@ -321,6 +381,7 @@ export default class VideoShortsFeed extends Component {
     this.modal.show(VideoShortsCommentsSheet, {
       model: {
         item,
+        routeSessionOwner: this.args.routeSessionOwner,
         opener,
         onReply,
         onReplyPublished: (result) => this.handleReplyPublished(item, result),
@@ -343,6 +404,11 @@ export default class VideoShortsFeed extends Component {
         .querySelector(".video-shorts-feed__items")
         ?.focus({ preventScroll: true });
     });
+  }
+
+  @action
+  handleAuthorizationRevoked() {
+    this.closeComments();
   }
 
   @action
@@ -458,12 +524,15 @@ export default class VideoShortsFeed extends Component {
 
   <template>
     <div
-      class="video-shorts-feed__viewport"
+      class="video-shorts-feed__viewport {{if
+        this.commentsOpen
+        "video-shorts-feed__viewport--comments-open"
+      }}"
       data-active-post-id={{this.activeItem.post_id}}
       data-comments-open-post-id={{this.commentsSurfaceItem.post_id}}
       data-comments-open={{if this.commentsOpen "true" "false"}}
       data-comments-layout={{if this.isDesktopLayout "desktop" "mobile"}}
-      {{this.trackLayoutMode}}
+      {{this.trackMediaPlayback}}
     >
       <ol
         class="video-shorts-feed__items"
@@ -485,6 +554,7 @@ export default class VideoShortsFeed extends Component {
               @item={{item}}
               @isActive={{eq index this.activeIndex}}
               @shouldPreload={{this.isWithinPreloadWindow index}}
+              @routeSessionOwner={{this.mediaSessionOwner}}
               @replyCount={{this.replyCountFor item}}
               @onOpenComments={{this.openComments}}
             />
@@ -526,10 +596,12 @@ export default class VideoShortsFeed extends Component {
           >
             <VideoShortsCommentsSurface
               @item={{this.commentsSurfaceItem}}
+              @routeSessionOwner={{@routeSessionOwner}}
               @replyCount={{this.replyCountFor this.commentsSurfaceItem}}
               @onReplyPublished={{this.handleActiveReplyPublished}}
               @onCommentDeleted={{this.handleActiveCommentDeleted}}
               @onCommentMutation={{this.handleActiveCommentMutation}}
+              @onAuthorizationRevoked={{this.handleAuthorizationRevoked}}
             />
           </div>
 

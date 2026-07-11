@@ -1,4 +1,5 @@
 import Component from "@glimmer/component";
+import { i18n } from "discourse-i18n";
 import VideoShortsActionRail from "./action-rail";
 import VideoShortsEmbedPlayer from "./embed-player";
 import VideoShortsHlsPlayer from "./hls-player";
@@ -6,24 +7,28 @@ import VideoShortsMetadata from "./metadata";
 import VideoShortsNativePlayer from "./native-player";
 
 export default class VideoShortsItem extends Component {
-  get hasNativeVideo() {
-    return Boolean(this.args.item?.media?.video_url);
+  get mediaKind() {
+    return this.args.item?.media?.kind;
   }
 
-  get hasProviderIframe() {
-    return this.args.item?.media?.renderability === "iframe_candidate";
+  get hasNativeVideo() {
+    return ["upload_mp4", "external_mp4"].includes(this.mediaKind);
+  }
+
+  get hasEmbed() {
+    return ["bilibili", "youtube"].includes(this.mediaKind);
   }
 
   get hasHlsVideo() {
-    return (
-      this.args.item?.media?.provider === "hls" &&
-      this.args.item?.media?.renderability === "hls" &&
-      Boolean(this.args.item?.media?.hls_url)
-    );
+    return this.mediaKind === "external_hls";
   }
 
   get shouldRenderMedia() {
-    return this.args.isActive;
+    return (
+      this.mediaKind === "fallback" ||
+      this.args.isActive ||
+      (this.args.shouldPreload && (this.hasNativeVideo || this.hasHlsVideo))
+    );
   }
 
   <template>
@@ -40,15 +45,22 @@ export default class VideoShortsItem extends Component {
                 @item={{@item}}
                 @isActive={{@isActive}}
                 @shouldPreload={{@shouldPreload}}
+                @routeSessionOwner={{@routeSessionOwner}}
               />
             {{else if this.hasHlsVideo}}
               <VideoShortsHlsPlayer
                 @item={{@item}}
                 @isActive={{@isActive}}
                 @shouldPreload={{@shouldPreload}}
+                @routeSessionOwner={{@routeSessionOwner}}
+              />
+            {{else if this.hasEmbed}}
+              <VideoShortsEmbedPlayer
+                @item={{@item}}
+                @routeSessionOwner={{@routeSessionOwner}}
               />
             {{else}}
-              <VideoShortsEmbedPlayer @item={{@item}} />
+              <a class="video-shorts-embed-player__fallback" href={{@item.post_url}}>{{i18n "video_shorts.actions.open_topic"}}</a>
             {{/if}}
           {{else}}
             <div class="video-shorts-item__media-placeholder"></div>

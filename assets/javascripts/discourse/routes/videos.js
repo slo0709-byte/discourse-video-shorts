@@ -3,19 +3,29 @@ import DiscourseRoute from "discourse/routes/discourse";
 import { loadInitialVideoShortsFeed } from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-feed";
 
 const VIDEO_SHORTS_BODY_CLASS = "video-shorts-route";
+const VIDEO_SHORTS_MOBILE_BODY_CLASS = "video-shorts-route--mobile";
 const VIDEO_SHORTS_MOBILE_ROUTE_HEIGHT = "--video-shorts-mobile-route-height";
 const TEXT_INPUT_SELECTOR = "input, textarea, select, [contenteditable='true']";
 
-function postIdFromLocation() {
-  const postId = new URLSearchParams(window.location.search).get("post_id");
+function normalizePostId(postId) {
+  return /^\d+$/.test(String(postId || "")) ? String(postId) : null;
+}
 
-  return /^\d+$/.test(postId || "") ? postId : null;
+function postIdFromTransition(transition) {
+  return (
+    normalizePostId(transition?.to?.queryParams?.post_id) ||
+    normalizePostId(new URLSearchParams(window.location.search).get("post_id"))
+  );
 }
 
 export default class VideosRoute extends DiscourseRoute {
   @service router;
   @service siteSettings;
+  @service site;
 
+  queryParams = {
+    post_id: { refreshModel: false, replace: true },
+  };
   syncMobileRouteHeight = () => {
     if (document.activeElement?.matches?.(TEXT_INPUT_SELECTOR)) {
       return;
@@ -36,22 +46,35 @@ export default class VideosRoute extends DiscourseRoute {
   activate() {
     super.activate(...arguments);
     document.body.classList.add(VIDEO_SHORTS_BODY_CLASS);
-    this.syncMobileRouteHeight();
-    window.addEventListener("resize", this.syncMobileRouteHeight);
-    window.visualViewport?.addEventListener(
-      "resize",
-      this.syncMobileRouteHeight,
+
+    document.body.classList.toggle(
+      VIDEO_SHORTS_MOBILE_BODY_CLASS,
+      this.site.mobileView,
     );
+
+    if (this.site.mobileView) {
+      this.syncMobileRouteHeight();
+      window.addEventListener("resize", this.syncMobileRouteHeight);
+      window.visualViewport?.addEventListener(
+        "resize",
+        this.syncMobileRouteHeight,
+      );
+    }
   }
 
   deactivate() {
-    window.removeEventListener("resize", this.syncMobileRouteHeight);
-    window.visualViewport?.removeEventListener(
-      "resize",
-      this.syncMobileRouteHeight,
-    );
-    document.body.style.removeProperty(VIDEO_SHORTS_MOBILE_ROUTE_HEIGHT);
+    if (this.site.mobileView) {
+      window.removeEventListener("resize", this.syncMobileRouteHeight);
+      window.visualViewport?.removeEventListener(
+        "resize",
+        this.syncMobileRouteHeight,
+      );
+      document.body.style.removeProperty(VIDEO_SHORTS_MOBILE_ROUTE_HEIGHT);
+    }
+    this.controllerFor("videos")?.destroyRouteOwners();
+
     document.body.classList.remove(VIDEO_SHORTS_BODY_CLASS);
+    document.body.classList.remove(VIDEO_SHORTS_MOBILE_BODY_CLASS);
     super.deactivate(...arguments);
   }
 
@@ -61,9 +84,9 @@ export default class VideosRoute extends DiscourseRoute {
     }
   }
 
-  async model() {
+  async model(_params, transition) {
     return await loadInitialVideoShortsFeed({
-      restorePostId: postIdFromLocation(),
+      restorePostId: postIdFromTransition(transition),
     });
   }
 

@@ -17,13 +17,13 @@ export default <template>
 
     {{#if @controller.error}}
       <div class="video-shorts-error" role="alert">
-        <span>Videos could not be loaded.</span>
+        <span>{{i18n "video_shorts.feed.load_error"}}</span>
         <button
           type="button"
           class="btn btn-primary video-shorts-retry"
           {{on "click" @controller.retry}}
         >
-          Retry
+          {{i18n "video_shorts.feed.retry"}}
         </button>
       </div>
     {{/if}}
@@ -38,24 +38,10 @@ export default <template>
       <VideoShortsFeed
         @items={{@controller.items}}
         @initialActivePostId={{@controller.initialActivePostId}}
-        @onActivePostIdChange={{@controller.replaceActivePostId}}
+        @requestedPostId={{@controller.requestedPostId}}
+        @routeSessionOwner={{@controller.routeSession}}
       />
     {{/if}}
 
-    {{#if @controller.autoContinuationCapped}}
-      <div class="video-shorts-continuation">
-        More videos may be available.
-      </div>
-    {{/if}}
-
-    {{#if @controller.canLoadMore}}
-      <button
-        type="button"
-        class="btn video-shorts-load-more"
-        {{on "click" @controller.loadMore}}
-      >
-        Load more
-      </button>
-    {{/if}}
   </section>
 </template>

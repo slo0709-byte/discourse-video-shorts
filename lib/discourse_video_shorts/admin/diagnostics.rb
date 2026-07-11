@@ -7,8 +7,7 @@ module DiscourseVideoShorts
       MAX_SAMPLE_SIZE = 25
       DEFAULT_SCAN_LIMIT = 100
       MAX_SCAN_LIMIT = 250
-      PROVIDER_BUCKETS = %w[native youtube bilibili vimeo fallback unsupported unknown].freeze
-      RENDERABILITY_BUCKETS = %w[native iframe_candidate fallback unknown].freeze
+      MEDIA_KIND_BUCKETS = %w[upload_mp4 youtube bilibili external_mp4 external_hls fallback unknown].freeze
 
       def initialize(guardian:, sample_size: nil, scan_limit: nil)
         @guardian = guardian
@@ -24,14 +23,15 @@ module DiscourseVideoShorts
 
         {
           enabled: SiteSetting.video_shorts_enabled,
+          kill_switch: kill_switch_summary,
+          canary: canary_summary,
+          policy: policy_summary,
           settings_summary: settings_summary(source),
           delivery: delivery_summary,
           sources: sources_summary(source),
           feed: feed_summary(feed, items),
-          providers: { counts: counts_for(items, %i[media provider], buckets: PROVIDER_BUCKETS) },
-          renderability: {
-            counts: counts_for(items, %i[media renderability], buckets: RENDERABILITY_BUCKETS),
-          },
+          media: media_summary_for(items),
+          runtime: runtime_summary,
           samples: items.map { |item| sample_for(item, topics_by_id[item[:topic_id]]) },
         }
       end
@@ -105,11 +105,20 @@ module DiscourseVideoShorts
       end
 
       def feed_summary(feed, items)
+        scan = feed[:scan] || {}
+
         {
           sample_size: items.length,
           requested_sample_size: sample_size,
           scan_limit: scan_limit,
-          scan_limit_reached: !!feed[:scan_limit_reached],
+          candidates_scanned: scan[:candidates_scanned].to_i,
+          scan_limit_reached: !!scan[:scan_limit_reached],
+          end_reached: !!scan[:end_reached],
+          sql: {
+            strategy: "bounded_candidate_scan",
+            candidate_scan_limit: scan_limit,
+            measured_query_count: nil,
+          },
         }
       end
 
@@ -117,6 +126,58 @@ module DiscourseVideoShorts
         warning.transform_keys(&:to_s).tap do |serialized|
           serialized["code"] = serialized["code"].to_s
         end
+      end
+
+      def kill_switch_summary
+        {
+          active: !SiteSetting.video_shorts_enabled,
+          reason: SiteSetting.video_shorts_enabled ? nil : "site_setting_disabled",
+        }
+      end
+
+      def canary_summary
+        group_ids = integer_list(SiteSetting.video_shorts_canary_group_ids)
+
+        {
+          enabled: group_ids.present?,
+          group_ids: group_ids,
+          audience: group_ids.present? ? "group_restricted" : "all_members",
+        }
+      end
+
+      def policy_summary
+        policy = DiscourseVideoShorts::OriginPolicy.current
+
+        {
+          revision: policy.revision,
+          external_media_enabled: policy.external_media_enabled,
+          origins: policy.origins,
+          updated_at: policy.updated_at.iso8601,
+        }
+      end
+
+      def media_summary_for(items)
+        {
+          kinds: counts_for(items, %i[media kind], buckets: MEDIA_KIND_BUCKETS),
+          failed_reasons: failed_reasons_for(items),
+        }
+      end
+
+      def runtime_summary
+        {
+          heartbeat: { observable: false, reason: "client_session_metric" },
+          delta: { observable: false, reason: "client_session_metric" },
+          authorization_lease: { observable: false, reason: "client_session_metric" },
+          resources: { observable: false, reason: "client_session_metric" },
+        }
+      end
+
+      def failed_reasons_for(items)
+        items
+          .filter_map { |item| item.dig(:media, :fallback_reason).presence }
+          .tally
+          .map { |reason, count| { reason: reason.to_s, count: count } }
+          .sort_by { |entry| entry[:reason] }
       end
 
       def counts_for(items, path, buckets:)
@@ -190,9 +251,7 @@ module DiscourseVideoShorts
       end
 
       def media_summary(media)
-        summary = media.slice(:provider, :renderability, :fallback, :fallback_reason)
-        summary[:embed_url] = media[:embed_url] if media[:renderability] == "iframe_candidate"
-        summary
+        media.slice(:kind, :required_origins, :policy_revision, :fallback_reason)
       end
 
       def clamp_integer(value, default:, min:, max:)

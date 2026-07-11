@@ -1,6 +1,7 @@
 import { ajax } from "discourse/lib/ajax";
 
-export const VIDEO_SHORTS_COMMENTS_PAGE_SIZE = 20;
+export const VIDEO_SHORTS_COMMENTS_PAGE_SIZE = 50;
+export const VIDEO_SHORTS_COMMENTS_DELTA_SIZE = 100;
 const FLAG_POST_ACTION_IDS = new Set([3, 4, 7, 8, 10]);
 const LIKE_POST_ACTION_ID = 2;
 
@@ -18,13 +19,12 @@ function replyToUsername(post) {
 }
 
 export function canFlagPost(post) {
-  if (post.can_flag) {
-    return true;
-  }
-
-  return actionsSummary(post).some((action) => {
-    return FLAG_POST_ACTION_IDS.has(action.id) && action.can_act;
-  });
+  return (
+    Boolean(post?.can_flag) ||
+    actionsSummary(post).some(
+      (action) => FLAG_POST_ACTION_IDS.has(action.id) && action.can_act,
+    )
+  );
 }
 
 export function commentLikeCount(post) {
@@ -32,28 +32,17 @@ export function commentLikeCount(post) {
     return post.like_count;
   }
 
-  const likeAction = actionsSummary(post).find((action) => {
-    return action.id === LIKE_POST_ACTION_ID;
-  });
-
-  return Number(likeAction?.count || 0);
+  return Number(
+    actionsSummary(post).find((action) => action.id === LIKE_POST_ACTION_ID)
+      ?.count || 0,
+  );
 }
 
 export function normalizeComment(post) {
   return {
-    id: post.id,
-    post_id: post.id,
-    post_number: post.post_number,
-    user_id: post.user_id,
-    username: post.username,
-    name: post.name,
-    avatar_template: post.avatar_template,
-    cooked: post.cooked,
-    created_at: post.created_at,
-    updated_at: post.updated_at,
-    version: post.version,
-    post_type: post.post_type,
-    post_url: post.post_url,
+    ...post,
+    id: post.id || post.post_id,
+    post_id: post.post_id || post.id,
     reply_count: post.reply_count || 0,
     like_count: commentLikeCount(post),
     raw: post.raw || "",
@@ -67,32 +56,58 @@ export function normalizeComment(post) {
     reply_to_post_number: post.reply_to_post_number || null,
     reply_to_user: post.reply_to_user || null,
     reply_to_username: replyToUsername(post),
-    replies: Array.isArray(post.replies)
-      ? post.replies.map((reply) => normalizeComment(reply))
-      : [],
+    replies: [],
   };
 }
 
-export function normalizeDirectReplies(response) {
-  const posts = Array.isArray(response) ? response : [];
-  const comments = posts.map((post) => normalizeComment(post));
-  const lastComment = comments[comments.length - 1];
-
-  return {
-    comments,
-    hasMore: posts.length === VIDEO_SHORTS_COMMENTS_PAGE_SIZE,
-    nextAfter: lastComment?.post_number || null,
-  };
+function snapshotUrl(postId) {
+  return `/videos/posts/${postId}/comments.json`;
 }
 
-export async function fetchVideoShortsComments({ postId, after = null }) {
-  const data = {};
+function deltaUrl(postId) {
+  return `/videos/posts/${postId}/comments/delta.json`;
+}
 
-  if (after) {
-    data.after = after;
+export async function fetchVideoShortsComments({
+  postId,
+  cursor = null,
+  limit = VIDEO_SHORTS_COMMENTS_PAGE_SIZE,
+}) {
+  let data = { limit };
+  if (cursor) {
+    data.cursor = cursor;
   }
 
-  const response = await ajax(`/posts/${postId}/replies.json`, { data });
+  let response = await ajax(snapshotUrl(postId), { data });
+  return {
+    comments: (response.comments || []).map(normalizeComment),
+    hasMore: Boolean(response.has_more),
+    nextCursor: response.next_cursor || null,
+    visibleReplyCount: Number(response.visible_reply_count),
+    changeCursor: response.change_cursor || null,
+    authorizationLease: response.authorization_lease || null,
+    sourcePostId: response.source_post_id || postId,
+  };
+}
 
-  return normalizeDirectReplies(response);
+export async function fetchVideoShortsCommentDelta({
+  postId,
+  since,
+  limit = VIDEO_SHORTS_COMMENTS_DELTA_SIZE,
+}) {
+  let response = await ajax(deltaUrl(postId), { data: { since, limit } });
+  return {
+    changes: (response.changes || []).map((change) =>
+      change.deleted || change.tombstone
+        ? { ...change, post_id: change.post_id || change.id }
+        : normalizeComment(change),
+    ),
+    hasMore: Boolean(response.has_more),
+    nextChangeCursor: response.next_change_cursor || null,
+    visibleReplyCount: Number(response.visible_reply_count),
+  };
+}
+
+export function isDeltaExpired(error) {
+  return error?.jqXHR?.status === 409 || error?.status === 409;
 }

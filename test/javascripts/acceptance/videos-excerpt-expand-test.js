@@ -1,5 +1,8 @@
 import { click, currentURL, visit } from "@ember/test-helpers";
 import { test } from "qunit";
+import pretender, {
+  pretenderHelpers,
+} from "discourse/tests/helpers/create-pretender";
 import { acceptance } from "discourse/tests/helpers/qunit-helpers";
 
 const LONG_EXCERPT =
@@ -26,19 +29,18 @@ function feedItem(excerpt = LONG_EXCERPT) {
       liked: false,
       can_like: false,
       bookmarked: false,
-      bookmark_id: null,
       can_bookmark: false,
       can_flag: false,
       can_reply: false,
       share_url: "/t/long-summary-video/901/1",
     },
-    native_action_summary: [],
     media: {
-      provider: "native",
-      renderability: "native",
-      dedupe_key: "native:upload:901",
-      video_url: "/uploads/default/original/1X/video-901.mp4",
-      upload_id: 901,
+      kind: "upload_mp4",
+      identity: "v1:upload:901:fixture",
+      url: "/uploads/default/original/1X/video-901.mp4",
+      required_origins: [],
+      policy_revision: null,
+      fallback_reason: null,
     },
   };
 }
@@ -46,11 +48,21 @@ function feedItem(excerpt = LONG_EXCERPT) {
 acceptance("Video Shorts excerpt expansion", function (needs) {
   needs.settings({
     video_shorts_enabled: true,
-    video_shorts_excerpt_character_limit: 24,
+    video_shorts_excerpt_character_limit: 22,
+  });
+  needs.pretender((server, helper) => {
+    server.get("/videos/policy.json", () =>
+      helper.response({
+        revision: 1,
+        external_media_enabled: false,
+        origins: [],
+        generated_at: "2026-06-07T00:00:00.000Z",
+      }),
+    );
   });
 
   test("truncates long excerpts to the configured character limit and expands in place", async function (assert) {
-    needs.pretender((server, helper) => {
+    ((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
           items: [feedItem()],
@@ -58,7 +70,7 @@ acceptance("Video Shorts excerpt expansion", function (needs) {
           scan_limit_reached: false,
         }),
       );
-    });
+    })(pretender, pretenderHelpers());
 
     await visit("/videos");
 
@@ -90,7 +102,7 @@ acceptance("Video Shorts excerpt expansion", function (needs) {
   });
 
   test("does not render an expand button when the excerpt fits the configured limit", async function (assert) {
-    needs.pretender((server, helper) => {
+    ((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
           items: [feedItem("Short summary")],
@@ -98,13 +110,11 @@ acceptance("Video Shorts excerpt expansion", function (needs) {
           scan_limit_reached: false,
         }),
       );
-    });
+    })(pretender, pretenderHelpers());
 
     await visit("/videos");
 
-    assert
-      .dom(".video-shorts-metadata__excerpt-text")
-      .hasText("Short summary");
+    assert.dom(".video-shorts-metadata__excerpt-text").hasText("Short summary");
     assert.dom(".video-shorts-metadata__excerpt-expand").doesNotExist();
   });
 });
