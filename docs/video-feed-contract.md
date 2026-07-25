@@ -129,7 +129,7 @@ Rules:
 
 ## CSP Requirements
 
-Trusted provider iframes require a compatible Discourse `frame-src` policy. The plugin contract expects `frame-src` to include `self`, `http:`, `https:`, `https://www.youtube.com`, `https://www.youtube-nocookie.com`, `https://player.bilibili.com`, and `https://player.vimeo.com`. Provider candidates still revalidate protocol, host, and path in the browser before rendering an iframe.
+Trusted provider iframes require a compatible Discourse `frame-src` policy. The plugin adds exact sources for `self`, `https://www.youtube.com`, `https://www.youtube-nocookie.com`, `https://player.bilibili.com`, `https://www.bilibili.com`, and `https://player.vimeo.com`. Its `media-src` policy allows self-hosted media, blobs, HTTPS media, configured HLS origins, and active Discourse CDN origins. Provider candidates still revalidate protocol, host, and path in the browser before rendering an iframe.
 
 ## Comments Contract
 

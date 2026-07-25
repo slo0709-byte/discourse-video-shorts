@@ -8,7 +8,7 @@ Discourse plugin that adds a fixed `/videos` page and `/videos.json` feed for a 
 
 The page is not an ordinary 16:9 video list and it is not an exact YouTube or TikTok clone. Metadata stays on the player stage, but likes, bookmarks, replies, shares, flags, and topic navigation continue to use Discourse-native behavior and permissions.
 
-Comments open in context instead of navigating away from `/videos`. Desktop uses the right comments/context panel; mobile uses the bottom sheet. V1 comments are direct replies to the source video post from Discourse core `GET /posts/:post_id/replies.json`; they are not a full topic timeline or nested thread view. Publishing a reply from the panel/sheet posts through Discourse core post creation, stays on `/videos`, and refreshes/appends the direct replies in place. Anonymous write attempts use the native login flow without opening the topic route.
+Comments open in context instead of navigating away from `/videos`. Desktop uses the right comments/context panel; mobile uses the bottom sheet. The initial list contains direct replies to the source video post, while expandable, paginated branches load nested replies on demand. It is not a full topic timeline. Publishing, replying to, and editing eligible comments all stay inside the panel/sheet and preserve the active video. Anonymous write attempts use the native login flow without opening the topic route.
 
 ## Install
 
@@ -31,6 +31,8 @@ Enable and configure the feed from site settings:
 - `video_shorts_enabled`: enables `/videos` and `/videos.json`.
 - `video_shorts_source_category_ids`: pipe-delimited category ids. Matching is exact category only.
 - `video_shorts_source_tag_names`: pipe-delimited tag names. Tags are ignored when Discourse tagging is disabled.
+- `video_shorts_hls_allowed_origins`: optional HTTPS HLS origins shown in diagnostics.
+- `video_shorts_excerpt_character_limit`: excerpt length before the expand control appears; defaults to 120.
 - `video_shorts_page_size`: default page size, clamped to 1-50.
 - `video_shorts_candidate_scan_limit`: candidate scan limit, clamped to 1-1000.
 - `video_shorts_debug_mode`: staff-facing diagnostics only.
@@ -70,6 +72,10 @@ Supported native uploads:
 - WebM
 - MOV/M4V when permitted by core upload settings
 
+Supported streaming links:
+
+- HTTPS HLS playlists (`.m3u8`)
+
 Provider links and cooked embeds:
 
 - Bilibili canonical URLs such as `https://www.bilibili.com/video/BV...`
@@ -81,7 +87,7 @@ Provider links and cooked embeds:
 
 Current provider contract is allowlist-based: trusted YouTube, Bilibili, and Vimeo embeds are serialized as `renderability: "iframe_candidate"` with a sanitized HTTPS `embed_url`, then revalidated in the browser before an iframe is rendered. Unsupported, malformed, non-HTTPS, or non-allowlisted provider URLs render a labeled topic fallback when their item is active. `b23.tv` expansion is out of scope for v1.
 
-Discourse CSP must allow the trusted iframe providers in `frame-src`. The expected provider allowance includes `self`, `http:`, `https:`, `https://www.youtube.com`, `https://www.youtube-nocookie.com`, `https://player.bilibili.com`, and `https://player.vimeo.com`.
+The plugin extends Discourse CSP with exact `frame-src` entries for YouTube, YouTube NoCookie, `player.bilibili.com`, `www.bilibili.com`, and Vimeo. Its `media-src` policy allows self-hosted media, blobs, HTTPS HLS sources, configured origins, and the active Discourse CDN origins.
 
 ## Native Actions
 
@@ -171,7 +177,7 @@ LOAD_PLUGINS=1 bin/qunit --standalone --target discourse-video-shorts plugins/di
 - Empty feed for staff/admins: open Admin > Plugins > Video Shorts and validate category/tag settings in the Diagnostics tab.
 - Hosted upload missing: verify the upload is attached to the post and core upload settings allow the extension.
 - Provider embed does not play inline: v1 intentionally falls back to the Discourse post unless iframe renderability has explicit browser/CSP evidence.
-- Comments do not show nested conversation: v1 intentionally shows direct replies to the source video post only, not the full topic timeline.
+- A nested branch is missing: open the parent branch control to load its direct children; the comments surface intentionally does not render the full topic timeline.
 - Pagination returns `invalid_cursor`: source settings changed, the cursor was tampered with, or the cursor belongs to a different user/anonymous identity.
 
 ## V1 Exclusions
@@ -183,5 +189,5 @@ Out of scope for v1:
 - custom upload/creator studio UI
 - `b23.tv` short-link expansion
 - arbitrary iframe support
-- full topic timelines or nested replies inside the comments sheet
+- full topic timelines inside the comments sheet
 - custom comments, likes, saves, or reports

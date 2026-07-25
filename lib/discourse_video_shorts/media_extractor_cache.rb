@@ -6,7 +6,7 @@ require 'json'
 module DiscourseVideoShorts
   class MediaExtractorCache
     CUSTOM_FIELD = 'discourse_video_shorts_media_cache_v1'
-    VERSION = 1
+    VERSION = 2
 
     class << self
       def extract_media_for_visible_post(post, guardian)
@@ -95,7 +95,8 @@ module DiscourseVideoShorts
     def settings_signature
       {
         authorized_extensions: SiteSetting.authorized_extensions.to_s,
-        authorized_extensions_for_staff: SiteSetting.authorized_extensions_for_staff.to_s
+        authorized_extensions_for_staff: SiteSetting.authorized_extensions_for_staff.to_s,
+        hls_allowed_origins: SiteSetting.video_shorts_hls_allowed_origins.to_s
       }
     end
 

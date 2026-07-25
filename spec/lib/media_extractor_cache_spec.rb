@@ -6,6 +6,7 @@ RSpec.describe DiscourseVideoShorts::MediaExtractorCache do
   before do
     SiteSetting.authorized_extensions =
       (SiteSetting.authorized_extensions.split("|") + %w[mp4 webm mov m4v]).uniq.join("|")
+    SiteSetting.video_shorts_hls_allowed_origins = "https://stream.example.com"
   end
 
   def make_post(raw:, cooked: raw)
@@ -45,6 +46,16 @@ RSpec.describe DiscourseVideoShorts::MediaExtractorCache do
     post = make_post(raw: "https://stream.example.com/path/video.m3u8")
     post.custom_fields[described_class::CUSTOM_FIELD] = "{not-json"
     post.save_custom_fields
+
+    expect(extract(post)).to include(provider: "hls", renderability: "hls")
+  end
+
+  it "keeps HTTPS HLS playable when the optional origins setting changes" do
+    post = make_post(raw: "https://stream.example.com/path/video.m3u8")
+
+    expect(extract(post)).to include(provider: "hls", renderability: "hls")
+
+    SiteSetting.video_shorts_hls_allowed_origins = ""
 
     expect(extract(post)).to include(provider: "hls", renderability: "hls")
   end

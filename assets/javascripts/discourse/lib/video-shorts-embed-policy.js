@@ -41,6 +41,10 @@ export function trustedVideoShortsIframe(media) {
       return null;
     }
 
+    if (media.provider === "bilibili") {
+      url.searchParams.set("autoplay", "0");
+    }
+
     return {
       src: url.toString(),
       title: `${media.provider} video embed`,

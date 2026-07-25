@@ -39,12 +39,16 @@ export default class VideoShortsItem extends Component {
               <VideoShortsNativePlayer
                 @item={{@item}}
                 @isActive={{@isActive}}
+                @isMuted={{@isMuted}}
+                @onToggleMute={{@onToggleMute}}
                 @shouldPreload={{@shouldPreload}}
               />
             {{else if this.hasHlsVideo}}
               <VideoShortsHlsPlayer
                 @item={{@item}}
                 @isActive={{@isActive}}
+                @isMuted={{@isMuted}}
+                @onToggleMute={{@onToggleMute}}
                 @shouldPreload={{@shouldPreload}}
               />
             {{else}}

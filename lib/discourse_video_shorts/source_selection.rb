@@ -23,17 +23,23 @@ module DiscourseVideoShorts
         :cursor_scope_digest,
       )
 
-    def initialize(guardian:, page_size: nil, candidate_scan_limit: nil)
+    def initialize(guardian:, page_size: nil, candidate_scan_limit: nil, metadata_only: false)
       @guardian = guardian
       @requested_page_size = page_size
       @requested_candidate_scan_limit = candidate_scan_limit
+      @metadata_only = metadata_only
     end
 
     def resolve
       category_sources = resolve_category_sources
       tag_sources = resolve_tag_sources
       warnings = staff_warnings(category_sources:, tag_sources:)
-      posts = candidate_posts(category_sources.effective_ids, tag_sources.effective_names)
+      posts =
+        if metadata_only
+          []
+        else
+          candidate_posts(category_sources.effective_ids, tag_sources.effective_names)
+        end
       digest_input =
         source_scope_digest_input(
           category_ids: category_sources.effective_ids,
@@ -73,7 +79,7 @@ module DiscourseVideoShorts
         :tagging_disabled,
       )
 
-    attr_reader :guardian, :requested_page_size, :requested_candidate_scan_limit
+    attr_reader :guardian, :requested_page_size, :requested_candidate_scan_limit, :metadata_only
 
     def resolve_category_sources
       configured_ids = integer_list(SiteSetting.video_shorts_source_category_ids)

@@ -39,6 +39,7 @@ export default class VideoShortsDiagnosticsController extends Controller {
   get hasDiagnostics() {
     return Boolean(
       this.diagnostics?.feed &&
+      this.diagnostics?.delivery?.hls &&
       this.diagnostics?.sources &&
       this.diagnostics?.providers &&
       this.diagnostics?.renderability &&

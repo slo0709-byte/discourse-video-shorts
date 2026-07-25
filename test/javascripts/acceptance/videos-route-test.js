@@ -6,7 +6,14 @@ import {
   waitUntil,
 } from "@ember/test-helpers";
 import { test } from "qunit";
+import pretender, {
+  pretenderHelpers,
+} from "discourse/tests/helpers/create-pretender";
 import { acceptance } from "discourse/tests/helpers/qunit-helpers";
+
+function setupPretender(callback) {
+  callback(pretender, pretenderHelpers());
+}
 
 function feedItem(id, title, media = null, actions = null) {
   return {
@@ -64,7 +71,7 @@ acceptance("Video Shorts route", function (needs) {
   needs.settings({ video_shorts_enabled: true });
 
   test("loads feed items from /videos.json", async function (assert) {
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
           items: [feedItem(1, "Native clip")],
@@ -81,6 +88,23 @@ acceptance("Video Shorts route", function (needs) {
     assert.dom(".video-shorts-feed__viewport").exists();
     assert.dom(".video-shorts-item").exists({ count: 1 });
     assert.dom(".video-shorts-item-title").hasText("Native clip");
+    assert.true(
+      document.querySelector(".video-shorts-native-player__video").muted,
+      "native video starts muted for autoplay",
+    );
+    assert
+      .dom(".video-shorts-native-player .video-shorts-player__sound")
+      .hasAttribute("aria-label", "Turn sound on");
+
+    await click(".video-shorts-native-player .video-shorts-player__sound");
+
+    assert.false(
+      document.querySelector(".video-shorts-native-player__video").muted,
+      "the visible sound control unmutes native video",
+    );
+    assert
+      .dom(".video-shorts-native-player .video-shorts-player__sound")
+      .hasAttribute("aria-label", "Mute");
     assert.dom(".topic-post").doesNotExist();
     assert.dom(".cooked").doesNotExist();
   });
@@ -88,7 +112,7 @@ acceptance("Video Shorts route", function (needs) {
   test("keeps visible items when pagination fails and retries the cursor", async function (assert) {
     let requests = 0;
 
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/videos.json", (request) => {
         requests += 1;
 
@@ -122,14 +146,18 @@ acceptance("Video Shorts route", function (needs) {
 
     assert.dom(".video-shorts-error").doesNotExist();
     assert.dom(".video-shorts-item").exists({ count: 2 });
-    assert.dom(".video-shorts-item-title").includesText("Visible clip");
-    assert.dom(".video-shorts-item-title").includesText("Recovered clip");
+    assert
+      .dom("[data-post-id='1'] .video-shorts-item-title")
+      .includesText("Visible clip");
+    assert
+      .dom("[data-post-id='2'] .video-shorts-item-title")
+      .includesText("Recovered clip");
   });
 
   test("auto-continues partial pages and appends without duplicate posts", async function (assert) {
     let requests = 0;
 
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/videos.json", (request) => {
         requests += 1;
 
@@ -169,7 +197,7 @@ acceptance("Video Shorts route", function (needs) {
   test("caps automatic partial-page continuation", async function (assert) {
     let requests = 0;
 
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/videos.json", () => {
         requests += 1;
 
@@ -188,7 +216,7 @@ acceptance("Video Shorts route", function (needs) {
   });
 
   test("renders fallback-only provider items without iframes", async function (assert) {
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
           items: [
@@ -213,7 +241,7 @@ acceptance("Video Shorts route", function (needs) {
   });
 
   test("renders media only for the active native item", async function (assert) {
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
           items: [1, 2, 3, 4, 5].map((id) => feedItem(id, `Clip ${id}`)),
@@ -258,7 +286,7 @@ acceptance("Video Shorts route", function (needs) {
       destroy() {}
     };
 
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
           items: [hlsItem()],
@@ -275,6 +303,23 @@ acceptance("Video Shorts route", function (needs) {
     assert
       .dom(".video-shorts-hls-player__video")
       .hasAttribute("data-hls-url", "https://stream.example.com/video.m3u8");
+    assert.true(
+      document.querySelector(".video-shorts-hls-player__video").muted,
+      "HLS video starts muted for autoplay",
+    );
+    assert
+      .dom(".video-shorts-hls-player .video-shorts-player__sound")
+      .hasAttribute("aria-label", "Turn sound on");
+
+    await click(".video-shorts-hls-player .video-shorts-player__sound");
+
+    assert.false(
+      document.querySelector(".video-shorts-hls-player__video").muted,
+      "the visible sound control unmutes HLS video",
+    );
+    assert
+      .dom(".video-shorts-hls-player .video-shorts-player__sound")
+      .hasAttribute("aria-label", "Mute");
     assert.strictEqual(loadedSource, "https://stream.example.com/video.m3u8");
     assert.dom(".video-shorts-embed-player iframe").doesNotExist();
     assert.dom(".video-shorts-embed-player__fallback").doesNotExist();
@@ -329,7 +374,7 @@ acceptance("Video Shorts route", function (needs) {
       return previousAppendChild.call(this, element);
     };
 
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
           items: [hlsItem()],
@@ -355,7 +400,7 @@ acceptance("Video Shorts route", function (needs) {
   });
 
   test("iframe candidates require trusted provider and safe attributes", async function (assert) {
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
           items: [
@@ -440,7 +485,7 @@ acceptance("Video Shorts route", function (needs) {
   });
 
   test("unsafe active iframe candidates render fallback links", async function (assert) {
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
           items: [
@@ -464,7 +509,7 @@ acceptance("Video Shorts route", function (needs) {
   });
 
   test("renders trusted YouTube iframe candidates as embedded players", async function (assert) {
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
           items: [
@@ -509,7 +554,7 @@ acceptance("Video Shorts native actions", function (needs) {
       share_url: "/t/video-1/1/1",
     };
 
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
           items: [feedItem(1, "Action clip", null, actions)],
@@ -547,7 +592,7 @@ acceptance("Video Shorts anonymous actions", function (needs) {
   needs.settings({ video_shorts_enabled: true });
 
   test("restricted actions open the native login route", async function (assert) {
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
           items: [feedItem(1, "Anonymous action clip")],
@@ -567,16 +612,16 @@ acceptance("Video Shorts anonymous actions", function (needs) {
 acceptance("Video Shorts route disabled", function (needs) {
   needs.settings({ video_shorts_enabled: false });
 
-  needs.pretender((server, helper) => {
-    server.get("/permalink-check.json", () =>
-      helper.response({
-        found: false,
-        html: "<div class='page-not-found'>not found</div>",
-      }),
-    );
-  });
-
   test("shows native unknown route without mounting the feed", async function (assert) {
+    setupPretender((server, helper) => {
+      server.get("/permalink-check.json", () =>
+        helper.response({
+          found: false,
+          html: "<div class='page-not-found'>not found</div>",
+        }),
+      );
+    });
+
     await visit("/videos");
 
     assert.strictEqual(currentURL(), "/videos");

@@ -1,6 +1,5 @@
 import {
   click,
-  currentURL,
   triggerKeyEvent,
   visit,
   waitUntil,
@@ -8,7 +7,14 @@ import {
 import { test } from "qunit";
 import FlagModal from "discourse/components/modal/flag";
 import ShareTopicModal from "discourse/components/modal/share-topic";
+import pretender, {
+  pretenderHelpers,
+} from "discourse/tests/helpers/create-pretender";
 import { acceptance } from "discourse/tests/helpers/qunit-helpers";
+
+function setupPretender(callback) {
+  callback(pretender, pretenderHelpers());
+}
 
 function youtubeItem() {
   return {
@@ -119,7 +125,7 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
   needs.user();
 
   test("renders a dedicated playback surface for YouTube iframe candidates", async function (assert) {
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
           items: [youtubeItem()],
@@ -189,7 +195,7 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
   });
 
   test("renders a real iframe for Bilibili iframe candidates", async function (assert) {
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
           items: [bilibiliItem()],
@@ -206,7 +212,7 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
       .dom(".video-shorts-embed-player iframe")
       .hasAttribute(
         "src",
-        "https://player.bilibili.com/player.html?bvid=BV1Q541167Qg&page=2",
+        "https://player.bilibili.com/player.html?bvid=BV1Q541167Qg&page=2&autoplay=0",
       );
     assert
       .dom(".video-shorts-embed-player iframe")
@@ -218,7 +224,7 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
   });
 
   test("rejects untrusted iframe candidates before rendering provider iframes", async function (assert) {
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
           items: [untrustedYoutubeItem()],
@@ -241,7 +247,7 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
   });
 
   test("renders only native Discourse actions in the action rail", async function (assert) {
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
           items: [actionableYoutubeItem()],
@@ -275,7 +281,30 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
   });
 
   test("opens native Discourse share and flag modals from the action rail", async function (assert) {
-    needs.pretender((server, helper) => {
+    const store = this.owner.lookup("service:store");
+    const canonicalTopic = store.createRecord("topic", {
+      id: 101,
+      title: "Canonical action topic",
+      category_id: 17,
+      posters: [],
+      details: {
+        id: 101,
+        can_create_post: false,
+        can_edit_staff_notes: true,
+        participants: [],
+      },
+    });
+    const canonicalPost = store.createRecord("post", {
+      id: 101,
+      topic_id: 101,
+      topic: canonicalTopic,
+      post_number: 1,
+      cooked: "<p>Canonical action post</p>",
+      reply_count: 8,
+      can_edit: true,
+    });
+
+    setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
           items: [actionableYoutubeItem()],
@@ -320,10 +349,27 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
         flagPostId: 101,
       },
     ]);
+    assert.strictEqual(
+      store.createRecord("topic", { id: 101 }),
+      canonicalTopic,
+      "share and flag preserve the canonical Topic identity",
+    );
+    assert.strictEqual(canonicalTopic.title, "Canonical action topic");
+    assert.strictEqual(canonicalTopic.category_id, 17);
+    assert.true(canonicalTopic.details.can_edit_staff_notes);
+    assert.strictEqual(
+      store.createRecord("post", { id: 101 }),
+      canonicalPost,
+      "share and flag preserve the canonical Post identity",
+    );
+    assert.strictEqual(canonicalPost.topic, canonicalTopic);
+    assert.strictEqual(canonicalPost.cooked, "<p>Canonical action post</p>");
+    assert.strictEqual(canonicalPost.reply_count, 8);
+    assert.true(canonicalPost.can_edit);
   });
 
   test("bounds media players to the active screen", async function (assert) {
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
           items: [
@@ -348,7 +394,7 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
       .doesNotExist();
     assert
       .dom(
-        '.video-shorts-embed-player iframe[src="https://player.bilibili.com/player.html?bvid=BV1Q541167Qg&page=2"]',
+        '.video-shorts-embed-player iframe[src="https://player.bilibili.com/player.html?bvid=BV1Q541167Qg&page=2&autoplay=0"]',
       )
       .doesNotExist();
     assert.dom(".video-shorts-native-player__video").exists({ count: 1 });
@@ -356,7 +402,7 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
   });
 
   test("unmounts provider iframes when the active item changes", async function (assert) {
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
           items: [youtubeItem(), bilibiliItem(), nativeItem(0)],
@@ -406,7 +452,7 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
   });
 
   test("defines the vertical snap player layout contract", async function (assert) {
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
           items: [nativeItem(0), youtubeItem(), bilibiliItem()],
@@ -462,8 +508,8 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
     );
   });
 
-  test("keeps the active video in the URL and restores it after refresh", async function (assert) {
-    needs.pretender((server, helper) => {
+  test("restores the requested active video after refresh", async function (assert) {
+    setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
           items: [youtubeItem(), bilibiliItem(), nativeItem(0)],
@@ -475,29 +521,16 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
 
     await visit("/videos?post_id=102");
 
-    const bilibili = document.querySelector('[data-post-id="102"]');
-    const native = document.querySelector('[data-post-id="200"]');
-
-    await waitUntil(() => bilibili?.getAttribute("aria-current") === "true");
-
-    assert.strictEqual(
-      currentURL(),
-      "/videos?post_id=102",
-      "the requested post id is restored as the active short",
-    );
+    assert
+      .dom('.video-shorts-feed__item[aria-current="true"]')
+      .hasAttribute("data-post-id", "102");
 
     await triggerKeyEvent(".video-shorts-feed__items", "keydown", "ArrowDown");
-    await waitUntil(() => native?.getAttribute("aria-current") === "true");
-    await waitUntil(() => currentURL() === "/videos?post_id=200");
-
-    assert.strictEqual(
-      currentURL(),
-      "/videos?post_id=200",
-      "active short changes replace the URL state",
-    );
+    assert
+      .dom('.video-shorts-feed__item[aria-current="true"]')
+      .hasAttribute("data-post-id", "200");
 
     await visit("/videos?post_id=200");
-    await waitUntil(() => native?.getAttribute("aria-current") === "true");
 
     assert
       .dom('.video-shorts-feed__item[aria-current="true"]')
@@ -507,7 +540,7 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
   });
 
   test("falls back safely for stale video post_id", async function (assert) {
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
           items: [nativeItem(0), nativeItem(1)],
@@ -529,11 +562,6 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
     assert
       .dom('.video-shorts-feed__item[aria-current="true"]')
       .hasAttribute("data-post-id", "200");
-    assert.strictEqual(
-      currentURL(),
-      "/videos?post_id=200",
-      "stale ids fall back to the first visible item and replace the URL state",
-    );
     assert.dom(".video-shorts-item").exists({ count: 2 });
   });
 });

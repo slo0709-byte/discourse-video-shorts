@@ -8,6 +8,9 @@ plugins:
   video_shorts_source_tag_names:
     default: ""
     type: list
+  video_shorts_hls_allowed_origins:
+    default: ""
+    type: list
   video_shorts_excerpt_character_limit:
     default: 120
     min: 1

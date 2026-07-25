@@ -163,7 +163,7 @@ RSpec.describe "Discourse video shorts admin diagnostics" do
     expect(response.status).to eq(200)
     body = response.parsed_body
     expect(body.dig("feed", "requested_sample_size")).to eq(25)
-    expect(body.dig("feed", "scan_limit")).to eq(250)
+    expect(body.dig("feed", "scan_limit")).to eq(999)
     expect(body.dig("providers", "counts")).to include(
       include("name" => "native", "count" => 1),
       include("name" => "youtube", "count" => 1),
@@ -184,7 +184,7 @@ RSpec.describe "Discourse video shorts admin diagnostics" do
     expect(response.body).not_to include("diagnostics.mp4")
   end
 
-  it "defaults malformed sampling parameters" do
+  it "defaults malformed sampling parameters to configured feed limits" do
     sign_in(admin)
 
     get "/admin/plugins/discourse-video-shorts/diagnostics.json",
@@ -195,10 +195,31 @@ RSpec.describe "Discourse video shorts admin diagnostics" do
 
     expect(response.status).to eq(200)
     expect(response.parsed_body.dig("feed", "requested_sample_size")).to eq(10)
-    expect(response.parsed_body.dig("feed", "scan_limit")).to eq(100)
+    expect(response.parsed_body.dig("feed", "scan_limit")).to eq(500)
+  end
+
+  it "finds HLS candidates beyond the first 100 configured posts" do
+    category = Fabricate(:category)
+    hls_post = make_text_post(category: category, raw: "https://stream.example.com/diagnostics.m3u8")
+    100.times { make_text_post(category: category, raw: "not a video candidate") }
+    SiteSetting.video_shorts_source_category_ids = category.id.to_s
+    SiteSetting.video_shorts_candidate_scan_limit = 101
+    SiteSetting.video_shorts_hls_allowed_origins = "https://stream.example.com"
+    sign_in(admin)
+
+    get "/admin/plugins/discourse-video-shorts/diagnostics.json"
+
+    expect(response.status).to eq(200)
+    body = response.parsed_body
+    expect(body.dig("feed", "scan_limit")).to eq(101)
+    expect(body.dig("providers", "counts")).to include(include("name" => "hls", "count" => 1))
+    expect(body.dig("renderability", "counts")).to include(include("name" => "hls", "count" => 1))
+    expect(body["samples"]).to include(include("post_id" => hls_post.id))
   end
 
   it "reports upload and HLS delivery guidance for CDN-backed video traffic" do
+    SiteSetting.video_shorts_hls_allowed_origins =
+      "https://stream.example.com|https://segments.example.com/path"
     sign_in(admin)
 
     get "/admin/plugins/discourse-video-shorts/diagnostics.json"
@@ -214,7 +235,9 @@ RSpec.describe "Discourse video shorts admin diagnostics" do
       "hls" =>
         include(
           "requires_https" => true,
-          "recommendation" => include("CDN"),
+          "allowed_origins" => ["https://stream.example.com", "https://segments.example.com"],
+          "media_csp_sources" => include("'self'", "blob:", "https://stream.example.com"),
+          "recommendation" => include("HTTPS"),
         ),
     )
   end

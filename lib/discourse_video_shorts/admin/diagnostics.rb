@@ -5,15 +5,20 @@ module DiscourseVideoShorts
     class Diagnostics
       DEFAULT_SAMPLE_SIZE = 10
       MAX_SAMPLE_SIZE = 25
-      DEFAULT_SCAN_LIMIT = 100
-      MAX_SCAN_LIMIT = 250
-      PROVIDER_BUCKETS = %w[native youtube bilibili vimeo fallback unsupported unknown].freeze
-      RENDERABILITY_BUCKETS = %w[native iframe_candidate fallback unknown].freeze
+      MAX_SCAN_LIMIT = 1000
+      PROVIDER_BUCKETS = %w[native hls youtube bilibili vimeo fallback unsupported unknown].freeze
+      RENDERABILITY_BUCKETS = %w[native hls iframe_candidate fallback unknown].freeze
 
       def initialize(guardian:, sample_size: nil, scan_limit: nil)
         @guardian = guardian
         @sample_size = clamp_integer(sample_size, default: DEFAULT_SAMPLE_SIZE, min: 1, max: MAX_SAMPLE_SIZE)
-        @scan_limit = clamp_integer(scan_limit, default: DEFAULT_SCAN_LIMIT, min: 1, max: MAX_SCAN_LIMIT)
+        @scan_limit =
+          clamp_integer(
+            scan_limit,
+            default: SiteSetting.video_shorts_candidate_scan_limit,
+            min: 1,
+            max: MAX_SCAN_LIMIT,
+          )
       end
 
       def call
@@ -80,8 +85,10 @@ module DiscourseVideoShorts
           },
           hls: {
             requires_https: true,
+            allowed_origins: HlsOriginPolicy.configured_origins,
+            media_csp_sources: HlsOriginPolicy.media_csp_sources,
             recommendation:
-              "Host m3u8 playlists and segments on an HTTPS CDN; the feed passes external HLS URLs through to the browser player.",
+              "Allow each HTTPS HLS CDN origin, including its playlist and segment host, before publishing the stream.",
           },
         }
       end

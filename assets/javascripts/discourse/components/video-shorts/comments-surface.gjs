@@ -5,40 +5,40 @@ import { fn } from "@ember/helper";
 import { on } from "@ember/modifier";
 import { action } from "@ember/object";
 import { getOwner } from "@ember/owner";
+import { scheduleOnce } from "@ember/runloop";
 import { service } from "@ember/service";
-import { trustHTML } from "@ember/template";
 import { modifier } from "ember-modifier";
+import AnonymousFlagModal from "discourse/components/modal/anonymous-flag";
 import FlagModal from "discourse/components/modal/flag";
+import HistoryModal from "discourse/components/modal/history";
 import { popupAjaxError } from "discourse/lib/ajax-error";
 import PostFlag from "discourse/lib/flag-targets/post-flag";
-import { getAbsoluteURL } from "discourse/lib/get-url";
-import { userPath } from "discourse/lib/url";
-import { clipboardCopy } from "discourse/lib/utilities";
-import { eq } from "discourse/truth-helpers";
-import dFormatDate from "discourse/ui-kit/helpers/d-format-date";
-import dIcon from "discourse/ui-kit/helpers/d-icon";
 import { i18n } from "discourse-i18n";
+import NativeComment from "discourse/plugins/discourse-video-shorts/discourse/components/video-shorts/native-comment";
 import {
-  deleteVideoShortsComment,
   fetchVideoShortsComment,
   updateVideoShortsComment,
 } from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-comment-actions";
-import { fetchVideoShortsComments } from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-comments";
+import {
+  fetchVideoShortsComments,
+  fetchVideoShortsReplyBranch,
+  normalizeComment,
+} from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-comments";
+import { videoShortsNativePost } from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-native-post";
+import { createVideoShortsNativeTopic } from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-native-topic";
+import {
+  createVideoShortsRealtimeCommentsLedger,
+  gateVideoShortsRealtimeComment,
+} from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-realtime-comments";
 import {
   createVideoShortsReply,
   videoShortsReplyErrorMessage,
 } from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-reply";
 import { videoShortsAccentStyle } from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-visual-accent";
 
-const TOP_LEVEL_COMPOSER = "reply";
-const COMMENT_REPLY_COMPOSER = "comment-reply";
-const ACTION_SHEET_INTERACTIVE_TARGET_SELECTOR =
-  "a, button, input, textarea, select, label, .video-shorts-comments-surface__tools, .video-shorts-comments-surface__tools-menu, .video-shorts-comments-surface__edit-input";
-
 function postKey(post) {
   return String(post?.post_id || post?.id || "");
 }
-
 function withoutKey(object, key) {
   const nextObject = { ...object };
 
@@ -56,10 +56,6 @@ function isDeletedPlaceholder(post) {
     post?.video_shorts_deleted_placeholder ||
       post?.cooked?.includes(i18n("video_shorts.comments.deleted_placeholder"))
   );
-}
-
-function isActionSheetInteractiveTarget(target) {
-  return Boolean(target?.closest?.(ACTION_SHEET_INTERACTIVE_TARGET_SELECTOR));
 }
 
 const CommentBranchControls = <template>
@@ -121,9 +117,153 @@ const CommentBranchControls = <template>
   {{/if}}
 </template>;
 
+const NativeCommentRow = <template>
+  <li
+    class="video-shorts-comments-surface__comment video-shorts-comments-surface__comment--native"
+    data-post-id={{@comment.post_id}}
+    data-post-number={{@comment.post_number}}
+  >
+    {{#if (@surface.isEditingComment @comment)}}
+      <form
+        class="video-shorts-comments-surface__reply-editor video-shorts-comments-surface__edit-editor"
+        data-video-shorts-edit-editor
+        data-video-shorts-inline-editor
+        data-post-id={{@comment.post_id}}
+        data-depth={{@depth}}
+        aria-label={{i18n "video_shorts.comments.edit"}}
+        {{on "submit" @surface.saveEdit}}
+      >
+        {{#if @surface.editLoading}}
+          <div
+            class="video-shorts-comments-surface__edit-loading"
+            data-video-shorts-edit-loading
+          >
+            {{i18n "video_shorts.comments.loading"}}
+          </div>
+        {{else}}
+          <textarea
+            data-video-shorts-edit-input
+            value={{@surface.editText}}
+            disabled={{@surface.editSubmitting}}
+            placeholder={{i18n "video_shorts.comments.edit_placeholder"}}
+            {{@surface.focusInput}}
+            {{on "input" @surface.updateEditText}}
+          ></textarea>
+        {{/if}}
+
+        {{#if @surface.editError}}
+          <p
+            class="video-shorts-comments-surface__reply-error"
+            data-video-shorts-edit-error
+            role="alert"
+          >
+            {{@surface.editError}}
+          </p>
+        {{/if}}
+
+        <div class="video-shorts-comments-surface__reply-editor-actions">
+          <button
+            type="button"
+            class="btn-flat"
+            data-video-shorts-edit-cancel
+            disabled={{@surface.editSubmitting}}
+            {{on "click" @surface.cancelEdit}}
+          >
+            {{i18n "video_shorts.comments.cancel"}}
+          </button>
+          <button
+            type="submit"
+            class="btn btn-primary"
+            data-video-shorts-edit-save
+            disabled={{@surface.editSubmitDisabled}}
+          >
+            {{if
+              @surface.editSubmitting
+              (i18n "video_shorts.comments.saving")
+              (i18n "video_shorts.comments.save")
+            }}
+          </button>
+        </div>
+      </form>
+    {{else}}
+      {{#let (@surface.nativePostFor @comment) as |post|}}
+        {{#if post}}
+          <NativeComment
+            @post={{post}}
+            @depth={{@depth}}
+            @canCreatePost={{@surface.canUseNativeReply}}
+            @deletePost={{@surface.deleteNativePost}}
+            @editPost={{@surface.editNativePost}}
+            @recoverPost={{@surface.recoverNativePost}}
+            @replyToPost={{@surface.replyToNativePost}}
+            @showFlags={{@surface.showNativeFlags}}
+            @showHistory={{@surface.showNativeHistory}}
+            @showLogin={{@surface.showLogin}}
+            @toggleBranch={{fn @surface.loadReplyBranch @comment}}
+          >
+            <CommentBranchControls @comment={{@comment}} @surface={{@surface}} />
+          </NativeComment>
+        {{/if}}
+      {{/let}}
+
+      {{#if (@surface.isReplyingToComment @comment)}}
+        <form
+          class="video-shorts-comments-surface__reply-editor video-shorts-comments-surface__edit-editor video-shorts-comments-surface__inline-reply-editor"
+          data-video-shorts-inline-editor
+          data-video-shorts-inline-reply-editor
+          data-video-shorts-reply-editor
+          data-reply-kind="nested"
+          data-post-id={{@comment.post_id}}
+          data-depth={{@depth}}
+          aria-label={{i18n "video_shorts.comments.reply"}}
+          {{on "submit" @surface.publishCommentReply}}
+        >
+          <textarea
+            data-video-shorts-reply-input
+            data-target-post-id={{@surface.commentReplyPostId}}
+            value={{@surface.commentReplyText}}
+            disabled={{@surface.commentReplySubmitting}}
+            placeholder={{i18n "video_shorts.comments.reply"}}
+            {{@surface.focusInput}}
+            {{on "input" @surface.updateCommentReplyText}}
+          ></textarea>
+          {{#if @surface.commentReplyError}}
+            <p
+              class="video-shorts-comments-surface__reply-error"
+              role="alert"
+            >
+              {{@surface.commentReplyError}}
+            </p>
+          {{/if}}
+          <div class="video-shorts-comments-surface__reply-editor-actions">
+            <button
+              type="button"
+              class="btn-flat"
+              data-video-shorts-reply-cancel
+              {{on "click" @surface.cancelReply}}
+            >
+              {{i18n "video_shorts.comments.cancel"}}
+            </button>
+            <button
+              type="submit"
+              class="btn btn-primary"
+              data-video-shorts-reply-submit
+              disabled={{@surface.commentReplySubmitDisabled}}
+            >
+              {{i18n "video_shorts.comments.publish"}}
+            </button>
+          </div>
+        </form>
+      {{/if}}
+    {{/if}}
+  </li>
+</template>;
+
 export default class VideoShortsCommentsSurface extends Component {
+  @service appEvents;
   @service currentUser;
   @service dialog;
+  @service messageBus;
   @service modal;
   @service store;
 
@@ -133,28 +273,6 @@ export default class VideoShortsCommentsSurface extends Component {
   @tracked error = null;
   @tracked hasMore = false;
   @tracked nextAfter = null;
-
-  @tracked replyText = "";
-  @tracked replyError = null;
-  @tracked replyNotice = null;
-  @tracked replySubmitting = false;
-
-  @tracked commentReplyPostId = null;
-  @tracked commentReplyText = "";
-  @tracked commentReplyError = null;
-  @tracked commentReplyNotice = null;
-  @tracked commentReplySubmitting = false;
-  @tracked commentReplyMentionRequired = false;
-
-  @tracked editingPostId = null;
-  @tracked editingText = "";
-  @tracked editingError = null;
-  @tracked editingSubmitting = false;
-
-  @tracked deletingPostId = null;
-  @tracked openToolsPostId = null;
-  @tracked actionSheetPostId = null;
-  @tracked highlightedPostId = null;
   @tracked childRepliesByPostId = {};
   @tracked expandedReplyPostIds = {};
   @tracked loadingReplyPostIds = {};
@@ -162,11 +280,42 @@ export default class VideoShortsCommentsSurface extends Component {
   @tracked replyPaginationByPostId = {};
   @tracked localReplyCount = null;
   @tracked hasDeletedPlaceholderContext = false;
-  @tracked activeComposer = null;
+  @tracked replyText = "";
+  @tracked replyError = null;
+  @tracked replySubmitting = false;
+  @tracked topLevelReplyOpen = false;
+  @tracked commentReplyPostId = null;
+  @tracked commentReplyText = "";
+  @tracked commentReplyError = null;
+  @tracked commentReplySubmitting = false;
+  @tracked editPostId = null;
+  @tracked editText = "";
+  @tracked editError = null;
+  @tracked editLoading = false;
+  @tracked editSubmitting = false;
 
   activePostId = null;
   loadToken = 0;
   loadingReplyPromisesByPostId = {};
+  realtimeSubscriptionId = 0;
+  realtimeDeletedPostIds = new Set();
+  nativeTopicIdentity = null;
+  nativeTopic = null;
+  nativePostRecords = new Map();
+
+  clearReplyFeedLock = modifier(() => {
+    return () => {
+      document.body.classList.remove("video-shorts-lightweight-composer-open");
+    };
+  });
+
+  focusInput = modifier((element) => {
+    queueMicrotask(() => {
+      if (!isDestroying(this) && !isDestroyed(this)) {
+        element.focus({ preventScroll: true });
+      }
+    });
+  });
 
   loadForItem = modifier((element, [item]) => {
     if (!item || item.post_id === this.activePostId) {
@@ -182,71 +331,81 @@ export default class VideoShortsCommentsSurface extends Component {
     this.replyPaginationByPostId = {};
     this.loadingReplyPromisesByPostId = {};
     this.localReplyCount = null;
+    this.resetReplyEditors();
+    this.nativeTopicIdentity = null;
+    this.nativeTopic = null;
+    this.nativePostRecords = new Map();
+    this.realtimeDeletedPostIds = new Set();
     this.hasDeletedPlaceholderContext = false;
     this.hasMore = false;
     this.nextAfter = null;
-    this.actionSheetPostId = null;
-    this.resetReplyState();
-    this.resetCommentReplyState();
-    this.resetEditingState();
     this.loadComments({ item });
   });
 
-  focusInput = modifier((element) => {
-    queueMicrotask(() => {
-      if (!isDestroying(this) && !isDestroyed(this)) {
-        element.focus({ preventScroll: true });
+  realtimeForItem = modifier(
+    (
+      element,
+      [topicIdValue, postId, postNumber, topicUrl, lastMessageId]
+    ) => {
+      const topicId = Number(topicIdValue);
+
+      if (!Number.isSafeInteger(topicId) || topicId <= 0) {
+        return;
       }
-    });
+
+      const channel = `/topic/${topicId}`;
+      const subscription = {
+        active: true,
+        id: ++this.realtimeSubscriptionId,
+        itemIdentity: [topicId, postId, postNumber, topicUrl].join(":"),
+        ledger: createVideoShortsRealtimeCommentsLedger(),
+      };
+      const callback = (data, globalId, messageId) => {
+        return this.handleRealtimeComment(
+          subscription,
+          data,
+          globalId,
+          messageId
+        );
+      };
+
+      this.messageBus.subscribe(channel, callback, lastMessageId);
+
+      return () => {
+        subscription.active = false;
+        this.messageBus.unsubscribe(channel, callback);
+      };
+    }
+  );
+
+  syncReplyCount = modifier((_element, [replyCount]) => {
+    const count = Number(replyCount);
+
+    if (Number.isFinite(count) && count >= 0) {
+      scheduleOnce("afterRender", this, this.applySyncedReplyCount, count);
+    }
   });
 
-  closeToolsOnOutsideInteraction = modifier((element) => {
-    const closeOnOutsidePointer = (event) => {
-      if (
-        !this.openToolsPostId &&
-        !this.actionSheetPostId &&
-        !this.commentReplyPostId
-      ) {
-        return;
-      }
+  refreshOnReconnect = modifier(() => {
+    const refresh = () => this.loadComments({ item: this.item });
 
-      if (
-        element.contains(event.target) &&
-        event.target.closest(
-          ".video-shorts-comments-surface__tools, .video-shorts-comments-surface__action-sheet, .video-shorts-comments-surface__reply-dialog",
-        )
-      ) {
-        return;
-      }
+    window.addEventListener("online", refresh);
 
-      this.closeTools();
-      this.closeActionSheet();
-      this.cancelCommentReply();
-    };
+    return () => window.removeEventListener("online", refresh);
+  });
 
-    const closeOnEscape = (event) => {
-      if (event.key === "Escape") {
-        this.closeTools();
-        this.closeActionSheet();
-        this.cancelCommentReply();
-      }
-    };
+  reconcileNativeComposerEdits = modifier(() => {
+    const eventName = "video-shorts:native-post-edited";
 
-    document.addEventListener("pointerdown", closeOnOutsidePointer, true);
-    document.addEventListener("keydown", closeOnEscape, true);
+    this.appEvents.on(eventName, this, this.applyNativeComposerEdit);
 
     return () => {
-      document.removeEventListener("pointerdown", closeOnOutsidePointer, true);
-      document.removeEventListener("keydown", closeOnEscape, true);
+      this.appEvents.off(eventName, this, this.applyNativeComposerEdit);
     };
   });
 
   childRepliesFor = (comment) => {
     return this.childRepliesByPostId[postKey(comment)] || [];
-  };
-
-  hasChildReplies = (comment) => {
-    return this.visualRepliesFor(comment).length > 0;
   };
 
   isTopLevelDisplayComment = (comment) => {
@@ -283,82 +442,8 @@ export default class VideoShortsCommentsSurface extends Component {
     return this.flattenChildReplies(comment);
   };
 
-  userPathFor = (post) => {
-    return userPath(normalizeUsername(post));
-  };
-
-  avatarUrl = (post, size = 48) => {
-    return (post?.avatar_template || "").replace("{size}", size);
-  };
-
   displayName = (post) => {
     return normalizeUsername(post);
-  };
-
-  cookedHtml = (post) => {
-    return trustHTML(post?.cooked || "");
-  };
-
-  canEditComment = (post) => {
-    return Boolean(post?.can_edit);
-  };
-
-  canDeleteComment = (post) => {
-    return Boolean(post?.can_delete);
-  };
-
-  canFlagComment = (post) => {
-    return Boolean(post?.can_flag);
-  };
-
-  canShowEditAction = (post) => {
-    return !isDeletedPlaceholder(post) && this.canEditComment(post);
-  };
-
-  canShowDeleteAction = (post) => {
-    return !isDeletedPlaceholder(post) && this.canDeleteComment(post);
-  };
-
-  canShowFlagAction = (post) => {
-    return !isDeletedPlaceholder(post) && this.canFlagComment(post);
-  };
-
-  hasCommentLinkAction = (post) => {
-    return Boolean(post?.post_url);
-  };
-
-  canShowReplyAction = () => {
-    return !this.currentUser || this.canCreatePost;
-  };
-
-  replyActionUsesMentionLabel = (post) => {
-    const postNumber = Number(post?.post_number || 0);
-    const sourcePostNumber = Number(this.item?.post_number || 0);
-
-    return Boolean(postNumber && postNumber !== sourcePostNumber);
-  };
-
-  replyDisplayTargetLabel = (post) => {
-    const replyToPostNumber = Number(post?.reply_to_post_number || 0);
-    const sourcePostNumber = Number(this.item?.post_number || 0);
-
-    if (!replyToPostNumber || replyToPostNumber === sourcePostNumber) {
-      return null;
-    }
-
-    const parent = this.findCommentByPostNumber(replyToPostNumber);
-
-    if (!parent) {
-      return null;
-    }
-
-    const username = post?.reply_to_username || normalizeUsername(parent);
-
-    if (!username) {
-      return null;
-    }
-
-    return username.startsWith("@") ? username : `@${username}`;
   };
 
   hasLoadedReplyBranch = (comment) => {
@@ -374,6 +459,14 @@ export default class VideoShortsCommentsSurface extends Component {
 
   isLoadingReplies = (comment) => {
     return Boolean(this.loadingReplyPostIds[postKey(comment)]);
+  };
+
+  isEditingComment = (comment) => {
+    return postKey(comment) === this.editPostId;
+  };
+
+  isReplyingToComment = (comment) => {
+    return postKey(comment) === this.commentReplyPostId;
   };
 
   replyErrorFor = (comment) => {
@@ -422,8 +515,7 @@ export default class VideoShortsCommentsSurface extends Component {
     return (
       this.canShowReplyBranchControl(comment) &&
       this.hasExpandedReplies(comment) &&
-      this.replyPaginationFor(comment).hasMore &&
-      this.replyBranchRemainingCount(comment) > 0
+      this.replyPaginationFor(comment).hasMore
     );
   };
 
@@ -453,9 +545,79 @@ export default class VideoShortsCommentsSurface extends Component {
     });
   };
 
-  deepRepliesFor = () => {
-    return [];
+  nativeTopicRecordFor = () => {
+    const identity = this.currentItemIdentity();
+
+    if (!this.nativeTopic || this.nativeTopicIdentity !== identity) {
+      this.nativeTopic = createVideoShortsNativeTopic(this.item, this.store);
+      this.nativeTopicIdentity = identity;
+    }
+
+    return this.nativeTopic;
   };
+
+  nativePostFor = (comment, { suppressEmbeddedReplies = true } = {}) => {
+    try {
+      return videoShortsNativePost({
+        comment: suppressEmbeddedReplies
+          ? { ...comment, reply_count: 0 }
+          : comment,
+        item: this.item,
+        topic: this.nativeTopicRecordFor(),
+        store: this.store,
+        records: this.nativePostRecords,
+      });
+    } catch {
+      return null;
+    }
+  };
+
+  applyNativeComposerEdit = (serverPost) => {
+    if (isDestroying(this) || isDestroyed(this)) {
+      return;
+    }
+
+    const normalized = normalizeComment(serverPost);
+
+    if (this.findCommentByPostId(normalized.post_id)) {
+      this.replaceComment(normalized);
+    }
+  };
+
+  nativeSourcePostFor = () => {
+    return this.nativePostFor(
+      {
+        id: this.item.post_id,
+        post_id: this.item.post_id,
+        post_number: this.item.post_number,
+        topic_id: this.item.topic_id,
+        user_id: this.item.user_id,
+        username: this.item.username,
+        name: this.item.name,
+        avatar_template: this.item.avatar_template,
+        cooked: this.item.excerpt || "",
+        raw: "",
+        created_at: this.item.created_at,
+        reply_count: this.sourceReplyCount(),
+        post_url: this.item.post_url,
+        actions_summary: this.item.native_action_summary || [],
+        can_edit: false,
+        can_delete: false,
+        can_flag: Boolean(this.item.actions?.can_flag),
+      },
+      { suppressEmbeddedReplies: false }
+    );
+  };
+
+  applySyncedReplyCount(count) {
+    if (
+      !isDestroying(this) &&
+      !isDestroyed(this) &&
+      count !== this.localReplyCount
+    ) {
+      this.localReplyCount = count;
+    }
+  }
 
   flattenChildReplies(comment) {
     return this.childRepliesFor(comment).flatMap((reply) => {
@@ -503,145 +665,23 @@ export default class VideoShortsCommentsSurface extends Component {
     return this.args.item;
   }
 
+  get canUseNativeReply() {
+    return !this.currentUser || this.canCreatePost;
+  }
+
   get commentsAccentStyle() {
     return videoShortsAccentStyle(this.item);
-  }
-
-  get topicRecord() {
-    return this.store.createRecord("topic", {
-      id: this.item.topic_id,
-      title: this.item.title,
-      fancy_title: this.item.title,
-      draft_key: `topic_${this.item.topic_id}`,
-      draft_sequence: 0,
-      details: {
-        can_create_post: this.canCreatePost,
-      },
-    });
-  }
-
-  commentPostRecord(comment) {
-    return this.store.createRecord("post", {
-      id: comment.post_id,
-      post_number: comment.post_number,
-      username: normalizeUsername(comment),
-      user_id: comment.user_id,
-      topic_id: this.item.topic_id,
-      topic_slug: this.item.topic_url?.split("/")[2],
-      topic: this.topicRecord,
-      raw: comment.raw,
-      cooked: comment.cooked,
-      created_at: comment.created_at,
-      reply_count: comment.reply_count || 0,
-      reply_to_post_number: comment.reply_to_post_number,
-      post_url: comment.post_url,
-      actions_summary: comment.actions_summary || [],
-      can_delete: Boolean(comment.can_delete),
-      can_edit: Boolean(comment.can_edit),
-      can_flag: this.canFlagComment(comment),
-      hidden: Boolean(comment.hidden),
-      yours: Boolean(comment.yours),
-    });
   }
 
   get canCreatePost() {
     return Boolean(this.currentUser && this.item?.actions?.can_reply);
   }
 
-  get trimmedReply() {
-    return this.replyText.trim();
-  }
-
-  get trimmedCommentReply() {
-    return this.commentReplyText.trim();
-  }
-
-  get trimmedEdit() {
-    return this.editingText.trim();
-  }
-
-  get replyCountLabel() {
-    const count = Number.isFinite(this.localReplyCount)
-      ? this.localReplyCount
-      : this.sourceReplyCount();
-
-    return i18n("video_shorts.comments.count", { count });
-  }
-
-  get replyActionsVisible() {
-    return this.activeComposer === TOP_LEVEL_COMPOSER || this.replySubmitting;
-  }
-
-  get commentReplyActionsVisible() {
-    return Boolean(this.commentReplyPostId) || this.commentReplySubmitting;
-  }
-
-  get selectedReplyTarget() {
-    return this.findCommentByPostId(this.commentReplyPostId);
-  }
-
-  get selectedActionSheetComment() {
-    return this.findCommentByPostId(this.actionSheetPostId);
-  }
-
-  get selectedReplyUsername() {
-    return normalizeUsername(this.selectedReplyTarget);
-  }
-
-  get selectedReplyTargetUsesMentionLabel() {
-    return Boolean(this.selectedReplyTarget && this.commentReplyMentionRequired);
-  }
-
-  get selectedReplyUsernameLabel() {
-    const username = this.selectedReplyUsername;
-
-    if (!username) {
-      return "";
-    }
-
-    if (!this.selectedReplyTargetUsesMentionLabel || username.startsWith("@")) {
-      return username;
-    }
-
-    return `@${username}`;
-  }
-
-  get commentReplyStatus() {
-    if (!this.selectedReplyUsernameLabel) {
-      return null;
-    }
-
-    return i18n("video_shorts.comments.replying_to", {
-      username: this.selectedReplyUsernameLabel,
-    });
-  }
-
-  get commentReplyPlaceholder() {
-    if (this.selectedReplyTargetUsesMentionLabel) {
-      return i18n("video_shorts.comments.reply_to_user", {
-        username: this.selectedReplyUsernameLabel,
-      });
-    }
-
-    return i18n("video_shorts.comments.reply");
-  }
-
-  get commentReplyDialogLabel() {
-    const username = this.selectedReplyUsernameLabel;
-
-    if (username) {
-      return i18n("video_shorts.comments.reply_to_user", { username });
-    }
-
-    return i18n("video_shorts.comments.reply");
-  }
-
-  get currentUserAvatarUrl() {
-    return (this.currentUser?.avatar_template || "").replace("{size}", 40);
-  }
-
   async loadComments({ append = false, item = this.item } = {}) {
     const token = append ? this.loadToken : ++this.loadToken;
+    const commentsAtRequestStart = append
+      ? null
+      : new Map(this.comments.map((comment) => [postKey(comment), comment]));
 
     try {
       this.error = null;
@@ -651,13 +691,18 @@ export default class VideoShortsCommentsSurface extends Component {
       const response = await fetchVideoShortsComments({
         postId: item.post_id,
         after: append ? this.nextAfter : null,
+        endpoint: item.comments_endpoint,
       });
 
       if (this.isStale(token)) {
         return;
       }
 
-      const comments = this.commentsWithoutLoadedChildren(response.comments);
+      const comments = this.commentsWithoutLoadedChildren(
+        response.comments.filter(
+          (comment) => !this.realtimeDeletedPostIds.has(postKey(comment))
+        )
+      );
 
       const existingIds = append
         ? new Set(this.comments.map((comment) => comment.id))
@@ -675,7 +720,30 @@ export default class VideoShortsCommentsSurface extends Component {
         this.loadingReplyPromisesByPostId = {};
       }
 
-      this.comments = append ? [...this.comments, ...deduped] : deduped;
+      if (append) {
+        this.comments = [...this.comments, ...deduped];
+      } else {
+        const commentsNow = new Map(
+          this.comments.map((comment) => [postKey(comment), comment])
+        );
+        const removedDuringRequest = new Set(
+          [...commentsAtRequestStart.keys()].filter((key) => !commentsNow.has(key))
+        );
+        const changedDuringRequest = new Map(
+          [...commentsNow].filter(
+            ([key, comment]) => commentsAtRequestStart.get(key) !== comment
+          )
+        );
+        const responseKeys = new Set(deduped.map((comment) => postKey(comment)));
+        const responseComments = deduped
+          .filter((comment) => !removedDuringRequest.has(postKey(comment)))
+          .map((comment) => changedDuringRequest.get(postKey(comment)) || comment);
+        const realtimeAdditions = [...changedDuringRequest]
+          .filter(([key]) => !responseKeys.has(key))
+          .map(([, comment]) => comment);
+
+        this.comments = [...realtimeAdditions, ...responseComments];
+      }
       this.hasDeletedPlaceholderContext =
         this.hasDeletedPlaceholderContext || this.comments.some(isDeletedPlaceholder);
       this.hasMore = response.hasMore;
@@ -718,6 +786,158 @@ export default class VideoShortsCommentsSurface extends Component {
       token !== this.loadToken ||
       (itemIdentity && itemIdentity !== this.currentItemIdentity())
     );
+  }
+
+  isStaleRealtime(subscription, event) {
+    const postState = subscription.ledger.posts[event.postId];
+
+    return (
+      !subscription.active ||
+      subscription.id !== this.realtimeSubscriptionId ||
+      subscription.itemIdentity !== this.currentItemIdentity() ||
+      postState?.lastMessageId !== event.messageId ||
+      postState?.tombstone === true ||
+      isDestroying(this) ||
+      isDestroyed(this)
+    );
+  }
+
+  isStaleRealtimeDeletion(subscription, event) {
+    const postState = subscription.ledger.posts[event.postId];
+
+    return (
+      !subscription.active ||
+      subscription.id !== this.realtimeSubscriptionId ||
+      subscription.itemIdentity !== this.currentItemIdentity() ||
+      postState?.lastMessageId !== event.messageId ||
+      postState?.tombstone !== true ||
+      isDestroying(this) ||
+      isDestroyed(this)
+    );
+  }
+
+  async handleRealtimeComment(subscription, data, globalId, messageId) {
+    if (
+      !subscription.active ||
+      subscription.id !== this.realtimeSubscriptionId ||
+      subscription.itemIdentity !== this.currentItemIdentity()
+    ) {
+      return;
+    }
+
+    const previousPostState = subscription.ledger.posts[data?.id];
+    const gated = gateVideoShortsRealtimeComment(
+      subscription.ledger,
+      data,
+      globalId,
+      messageId
+    );
+
+    subscription.ledger = gated.ledger;
+
+    if (!gated.accepted) {
+      return;
+    }
+
+    const event = gated.event;
+
+    if (event.type === "deleted" || event.type === "destroyed") {
+      this.realtimeDeletedPostIds = new Set([
+        ...this.realtimeDeletedPostIds,
+        String(event.postId),
+      ]);
+      const loadedComment = this.findCommentByPostId(event.postId);
+
+      if (loadedComment) {
+        const snapshot = await this.childrenSnapshotForDelete(loadedComment);
+
+        if (this.isStaleRealtimeDeletion(subscription, event)) {
+          return;
+        }
+
+        const currentComment = this.findCommentByPostId(event.postId);
+
+        if (!currentComment) {
+          return;
+        }
+
+        this.removeComment(currentComment, {
+          adjustCount: false,
+          childrenSnapshot: snapshot.children,
+          preserveUnknownReplies: true,
+          replyPagination: snapshot.pagination,
+        });
+      }
+
+      return;
+    }
+
+    if (event.type === "created" || event.type === "recovered") {
+      const nextDeletedPostIds = new Set(this.realtimeDeletedPostIds);
+      nextDeletedPostIds.delete(String(event.postId));
+      this.realtimeDeletedPostIds = nextDeletedPostIds;
+    }
+
+    if (
+      event.type === "revised" &&
+      !previousPostState &&
+      !this.findCommentByPostId(event.postId)
+    ) {
+      return;
+    }
+
+    return this.fetchAndApplyRealtimeComment(subscription, event);
+  }
+
+  async fetchAndApplyRealtimeComment(subscription, event) {
+    try {
+      const canonicalPost = await fetchVideoShortsComment(event.postId);
+
+      if (
+        this.isStaleRealtime(subscription, event) ||
+        !this.hasRenderablePostData(canonicalPost)
+      ) {
+        return;
+      }
+
+      if (this.replaceComment(canonicalPost)) {
+        return;
+      }
+
+      const sourcePostNumber = Number(this.item?.post_number || 0);
+      const replyToPostNumber = Number(
+        canonicalPost?.reply_to_post_number || 0
+      );
+
+      const isDirectReply =
+        sourcePostNumber &&
+        (replyToPostNumber === sourcePostNumber ||
+          (!replyToPostNumber && sourcePostNumber === 1));
+
+      if (isDirectReply) {
+        this.prependComment(canonicalPost);
+        return;
+      }
+
+      const parent = this.findCommentByPostNumber(replyToPostNumber);
+
+      if (!parent) {
+        return;
+      }
+
+      const displayParent = this.visualReplyHostFor(parent);
+
+      if (
+        !this.hasLoadedReplyBranch(displayParent) ||
+        !this.hasExpandedReplies(displayParent)
+      ) {
+        return;
+      }
+
+      this.appendChildReply(parent, canonicalPost);
+    } catch {
+      // A later topic event or an explicit branch load can supply canonical data.
+    }
   }
 
   updateReplyBranchComment(comment, children) {
@@ -783,7 +1003,7 @@ export default class VideoShortsCommentsSurface extends Component {
 
     request = (async () => {
       try {
-        const response = await fetchVideoShortsComments({
+        const response = await fetchVideoShortsReplyBranch({
           postId: comment.post_id,
           after: append ? pagination.nextAfter : null,
         });
@@ -843,13 +1063,12 @@ export default class VideoShortsCommentsSurface extends Component {
     return request;
   }
 
-  async refreshCommentsAfterMutation({ highlightedPostId = null } = {}) {
+  async refreshCommentsAfterMutation() {
     const deletedPlaceholders = this.deletedPlaceholdersForRefresh();
 
     await this.loadComments({ item: this.item });
     this.restoreDeletedPlaceholders(deletedPlaceholders);
 
-    this.highlightedPostId = highlightedPostId || this.highlightedPostId;
   }
 
   deletedPlaceholdersForRefresh() {
@@ -938,7 +1157,6 @@ export default class VideoShortsCommentsSurface extends Component {
       ...this.childRepliesFor(comment),
       ...this.loadedFlatChildrenFor(comment),
     ]);
-    const key = postKey(comment);
     const replyCount = Number(comment?.reply_count || 0);
     const pagination = this.replyPaginationFor(comment);
     const hasCompleteLocalBranch =
@@ -947,11 +1165,11 @@ export default class VideoShortsCommentsSurface extends Component {
       currentChildren.length >= replyCount;
 
     if (!replyCount || hasCompleteLocalBranch) {
-      return currentChildren;
+      return { children: currentChildren, pagination };
     }
 
     try {
-      const response = await fetchVideoShortsComments({
+      const response = await fetchVideoShortsReplyBranch({
         postId: comment.post_id,
       });
 
@@ -961,28 +1179,15 @@ export default class VideoShortsCommentsSurface extends Component {
         ...this.loadedFlatChildrenFor(comment),
       ]);
 
-      if (key) {
-        this.childRepliesByPostId = {
-          ...this.childRepliesByPostId,
-          [key]: children,
-        };
-        this.expandedReplyPostIds = {
-          ...this.expandedReplyPostIds,
-          [key]: true,
-        };
-        this.replyPaginationByPostId = {
-          ...this.replyPaginationByPostId,
-          [key]: {
-            hasMore: response.hasMore,
-            nextAfter: response.nextAfter,
-          },
-        };
-        this.updateReplyBranchComment(comment, children);
-      }
-
-      return children;
+      return {
+        children,
+        pagination: {
+          hasMore: response.hasMore,
+          nextAfter: response.nextAfter,
+        },
+      };
     } catch {
-      return currentChildren;
+      return { children: currentChildren, pagination };
     }
   }
 
@@ -992,19 +1197,7 @@ export default class VideoShortsCommentsSurface extends Component {
       sourcePostId: mutation.sourcePostId || this.item?.post_id,
     };
 
-    if (this.args.onCommentMutation) {
-      this.args.onCommentMutation(mutationWithSource);
-      return;
-    }
-
-    if (mutation.type === "create") {
-      this.args.onReplyPublished?.(mutationWithSource.post);
-      return;
-    }
-
-    if (mutation.type === "delete") {
-      this.args.onCommentDeleted?.(mutationWithSource.post);
-    }
+    this.args.onCommentMutation?.(mutationWithSource);
   }
 
   replyCountValueAfterDelta(countDelta) {
@@ -1055,6 +1248,14 @@ export default class VideoShortsCommentsSurface extends Component {
 
     if (replaced) {
       this.childRepliesByPostId = nextChildRepliesByPostId;
+
+      videoShortsNativePost({
+        comment: { ...updatedComment, reply_count: 0 },
+        item: this.item,
+        topic: this.nativeTopicRecordFor(),
+        store: this.store,
+        records: this.nativePostRecords,
+      });
     }
 
     return replaced;
@@ -1090,7 +1291,13 @@ export default class VideoShortsCommentsSurface extends Component {
           parentPostId = parentKey;
           removed = true;
 
-          if (!children.length) {
+          if (
+            !children.length &&
+            !(
+              options.preserveUnknownReplies &&
+              Number(comment?.reply_count || 0) > 0
+            )
+          ) {
             delete nextChildRepliesByPostId[targetKey];
             continue;
           }
@@ -1162,6 +1369,13 @@ export default class VideoShortsCommentsSurface extends Component {
         ...this.expandedReplyPostIds,
         [targetKey]: true,
       };
+
+      if (options.replyPagination) {
+        this.replyPaginationByPostId = {
+          ...this.replyPaginationByPostId,
+          [targetKey]: options.replyPagination,
+        };
+      }
     }
 
     if (countDelta === 0) {
@@ -1172,7 +1386,10 @@ export default class VideoShortsCommentsSurface extends Component {
       type: "delete",
       post,
       countDelta,
-      replyCountValue: this.replyCountValueAfterDelta(countDelta),
+      replyCountValue:
+        options.adjustCount === false
+          ? null
+          : this.replyCountValueAfterDelta(countDelta),
       parentPostId,
       keptPlaceholder,
     };
@@ -1278,57 +1495,6 @@ export default class VideoShortsCommentsSurface extends Component {
     return appended;
   }
 
-  async refreshReplyBranchAfterCreate(parentComment, createdReply, shouldRefresh) {
-    if (!shouldRefresh) {
-      return;
-    }
-
-    const displayParent = this.visualReplyHostFor(parentComment);
-    const key = postKey(displayParent);
-    const token = this.loadToken;
-    const itemIdentity = this.currentItemIdentity();
-
-    try {
-      const response = await fetchVideoShortsComments({
-        postId: displayParent.post_id,
-      });
-
-      if (this.isStale(token, itemIdentity)) {
-        return;
-      }
-
-      const children = this.uniqueReplies([
-        ...this.commentsWithoutLoadedChildren(response.comments),
-        createdReply,
-      ]);
-
-      this.childRepliesByPostId = {
-        ...this.childRepliesByPostId,
-        [key]: children,
-      };
-      this.expandedReplyPostIds = {
-        ...this.expandedReplyPostIds,
-        [key]: true,
-      };
-      this.replyPaginationByPostId = {
-        ...this.replyPaginationByPostId,
-        [key]: {
-          hasMore: response.hasMore,
-          nextAfter: response.nextAfter,
-        },
-      };
-      this.updateReplyBranchComment(displayParent, children);
-    } catch {
-      this.replyPaginationByPostId = {
-        ...this.replyPaginationByPostId,
-        [key]: {
-          hasMore: true,
-          nextAfter: null,
-        },
-      };
-    }
-  }
-
   prependComment(comment) {
     if (this.comments.some((existing) => postKey(existing) === postKey(comment))) {
       return;
@@ -1337,42 +1503,358 @@ export default class VideoShortsCommentsSurface extends Component {
     this.comments = [comment, ...this.comments];
   }
 
-  emitCreatedComment(post) {
-    const replyCountValue = this.replyCountValueAfterDelta(1);
-
-    this.emitCommentMutation({
-      type: "create",
-      post,
-      countDelta: 1,
-      replyCountValue,
-    });
-  }
-
-  resetReplyState() {
+  resetReplyEditors() {
     this.replyText = "";
     this.replyError = null;
-    this.replyNotice = null;
     this.replySubmitting = false;
-    this.activeComposer = null;
-  }
-
-  resetCommentReplyState() {
+    this.topLevelReplyOpen = false;
     this.commentReplyPostId = null;
     this.commentReplyText = "";
     this.commentReplyError = null;
-    this.commentReplyNotice = null;
     this.commentReplySubmitting = false;
-    this.commentReplyMentionRequired = false;
-    if (this.activeComposer === COMMENT_REPLY_COMPOSER) {
-      this.activeComposer = null;
+    this.editPostId = null;
+    this.editText = "";
+    this.editError = null;
+    this.editLoading = false;
+    this.editSubmitting = false;
+    document.body.classList.remove("video-shorts-lightweight-composer-open");
+  }
+
+  emitCreatedComment(post) {
+    this.emitCommentMutation({
+      type: "create",
+      post,
+      countDelta: 0,
+      replyCountValue: null,
+    });
+  }
+
+  get selectedReplyTarget() {
+    return this.findCommentByPostId(this.commentReplyPostId);
+  }
+
+  get replySubmitDisabled() {
+    return this.replySubmitting || !this.replyText.trim();
+  }
+
+  get commentReplySubmitDisabled() {
+    return this.commentReplySubmitting || !this.commentReplyText.trim();
+  }
+
+  get editSubmitDisabled() {
+    return (
+      this.editLoading || this.editSubmitting || !this.editText.trim()
+    );
+  }
+
+  @action
+  updateReplyText(event) {
+    this.replyText = event.target.value;
+  }
+
+  @action
+  updateCommentReplyText(event) {
+    this.commentReplyText = event.target.value;
+  }
+
+  @action
+  updateEditText(event) {
+    this.editText = event.target.value;
+    this.editError = null;
+  }
+
+  @action
+  cancelReply() {
+    this.resetReplyEditors();
+  }
+
+  @action
+  cancelEdit() {
+    this.resetReplyEditors();
+  }
+
+  @action
+  openNativeTopLevelReply() {
+    if (!this.currentUser) {
+      return this.showLogin();
+    }
+
+    this.resetReplyEditors();
+    this.topLevelReplyOpen = true;
+    document.body.classList.add("video-shorts-lightweight-composer-open");
+  }
+
+  @action
+  replyToNativePost(post) {
+    if (!this.currentUser) {
+      return this.showLogin();
+    }
+
+    const target = this.findCommentByPostId(post?.id);
+    if (!target) {
+      return false;
+    }
+
+    this.resetReplyEditors();
+    this.commentReplyPostId = postKey(target);
+    document.body.classList.add("video-shorts-lightweight-composer-open");
+  }
+
+  @action
+  async publishReply(event) {
+    event?.preventDefault();
+    const raw = this.replyText.trim();
+    if (!raw) {
+      this.replyError = i18n("video_shorts.comments.reply_empty");
+      return;
+    }
+
+    const token = this.loadToken;
+    const itemIdentity = this.currentItemIdentity();
+    this.replySubmitting = true;
+    this.replyError = null;
+    try {
+      const result = await createVideoShortsReply({
+        item: this.item,
+        raw,
+        replyToPostNumber:
+          Number(this.item?.post_number) > 1 ? this.item.post_number : null,
+      });
+      if (this.isStale(token, itemIdentity)) {
+        return;
+      }
+      if (this.hasRenderablePostData(result.post)) {
+        this.prependComment(result.post);
+        this.emitCreatedComment(result.post);
+      } else if (result.action !== "enqueued") {
+        await this.refreshCommentsAfterMutation();
+      }
+      this.resetReplyEditors();
+    } catch (error) {
+      if (!this.isStale(token, itemIdentity)) {
+        this.replyError = videoShortsReplyErrorMessage(error);
+      }
+    } finally {
+      if (!this.isStale(token, itemIdentity)) {
+        this.replySubmitting = false;
+      }
     }
   }
 
-  resetEditingState() {
-    this.editingPostId = null;
-    this.editingText = "";
-    this.editingError = null;
-    this.editingSubmitting = false;
+  @action
+  async publishCommentReply(event) {
+    event?.preventDefault();
+    const target = this.selectedReplyTarget;
+    const raw = this.commentReplyText.trim();
+    if (!target) {
+      this.commentReplyError = i18n("video_shorts.comments.reply_target_missing");
+      return;
+    }
+    if (!raw) {
+      this.commentReplyError = i18n("video_shorts.comments.reply_empty");
+      return;
+    }
+
+    const token = this.loadToken;
+    const itemIdentity = this.currentItemIdentity();
+    this.commentReplySubmitting = true;
+    this.commentReplyError = null;
+    try {
+      const result = await createVideoShortsReply({
+        item: this.item,
+        raw,
+        replyToPostNumber: target.post_number,
+      });
+      if (this.isStale(token, itemIdentity)) {
+        return;
+      }
+      if (this.hasRenderablePostData(result.post)) {
+        this.appendChildReply(target, result.post);
+        this.emitCreatedComment(result.post);
+      } else if (result.action !== "enqueued") {
+        await this.refreshCommentsAfterMutation();
+      }
+      this.resetReplyEditors();
+    } catch (error) {
+      if (!this.isStale(token, itemIdentity)) {
+        this.commentReplyError = videoShortsReplyErrorMessage(error);
+      }
+    } finally {
+      if (!this.isStale(token, itemIdentity)) {
+        this.commentReplySubmitting = false;
+      }
+    }
+  }
+
+  @action
+  async editNativePost(post) {
+    this.resetReplyEditors();
+
+    if (!this.currentUser) {
+      return this.showLogin();
+    }
+
+    if (!post?.can_edit) {
+      return false;
+    }
+
+    const postId = postKey(post);
+    const target = this.findCommentByPostId(postId);
+    const token = this.loadToken;
+    const itemIdentity = this.currentItemIdentity();
+
+    this.editPostId = postId;
+    this.editText = target?.raw || post.raw || "";
+    this.editError = null;
+    this.editLoading = true;
+    document.body.classList.add("video-shorts-lightweight-composer-open");
+
+    try {
+      const freshComment = await fetchVideoShortsComment(postId);
+
+      if (
+        this.isStale(token, itemIdentity) ||
+        this.editPostId !== postId
+      ) {
+        return false;
+      }
+
+      this.editText = freshComment.raw;
+    } catch {
+      if (
+        !this.isStale(token, itemIdentity) &&
+        this.editPostId === postId
+      ) {
+        this.editError = i18n("video_shorts.comments.edit_load_error");
+      }
+    } finally {
+      if (
+        !this.isStale(token, itemIdentity) &&
+        this.editPostId === postId
+      ) {
+        this.editLoading = false;
+      }
+    }
+
+    return false;
+  }
+
+  @action
+  async saveEdit(event) {
+    event?.preventDefault();
+
+    const postId = this.editPostId;
+    const raw = this.editText.trim();
+
+    if (!postId) {
+      return;
+    }
+
+    if (!raw) {
+      this.editError = i18n("video_shorts.comments.edit_empty");
+      return;
+    }
+
+    const token = this.loadToken;
+    const itemIdentity = this.currentItemIdentity();
+
+    this.editSubmitting = true;
+    this.editError = null;
+
+    try {
+      const updatedComment = await updateVideoShortsComment({ postId, raw });
+
+      if (
+        this.isStale(token, itemIdentity) ||
+        this.editPostId !== postId
+      ) {
+        return;
+      }
+
+      if (!this.replaceComment(updatedComment)) {
+        await this.refreshCommentsAfterMutation();
+      }
+
+      this.resetReplyEditors();
+    } catch {
+      if (
+        !this.isStale(token, itemIdentity) &&
+        this.editPostId === postId
+      ) {
+        this.editError = i18n("video_shorts.comments.edit_save_error");
+      }
+    } finally {
+      if (
+        !this.isStale(token, itemIdentity) &&
+        this.editPostId === postId
+      ) {
+        this.editSubmitting = false;
+      }
+    }
+  }
+
+  @action
+  showNativeFlags(post) {
+    this.modal.show(this.currentUser ? FlagModal : AnonymousFlagModal, {
+      model: {
+        flagTarget: new PostFlag(),
+        flagModel: post,
+        setHidden: () => post.set("hidden", true),
+      },
+    });
+  }
+
+  @action
+  showNativeHistory(post, revision) {
+    this.modal.show(HistoryModal, {
+      model: {
+        postId: post.id,
+        postVersion: revision || "latest",
+        post,
+        editPost: this.editNativePost,
+      },
+    });
+  }
+
+  @action
+  recoverNativePost(post) {
+    return post.recover().then(() => {
+      return this.refreshCommentsAfterMutation();
+    });
+  }
+
+  @action
+  deleteNativePost(post) {
+    if (!post?.can_delete || !this.currentUser) {
+      return false;
+    }
+
+    this.dialog.yesNoConfirm({
+      message: i18n("post.confirm_delete"),
+      didConfirm: async () => {
+        const comment = this.findCommentByPostId(post.id);
+        const snapshot = comment
+          ? await this.childrenSnapshotForDelete(comment)
+          : { children: [], pagination: null };
+
+        try {
+          await post.destroy(this.currentUser);
+
+          if (comment) {
+            const mutation = this.removeComment(comment, {
+              childrenSnapshot: snapshot.children,
+              replyPagination: snapshot.pagination,
+            });
+            this.emitCommentMutation(mutation);
+          } else {
+            await this.refreshCommentsAfterMutation();
+          }
+        } catch (error) {
+          post.undoDeleteState();
+          popupAjaxError(error);
+        }
+      },
+    });
   }
 
   @action
@@ -1387,424 +1869,6 @@ export default class VideoShortsCommentsSurface extends Component {
     }
   }
 
-  @action
-  openReply() {
-    if (!this.currentUser) {
-      return this.showLogin();
-    }
-
-    if (!this.canCreatePost) {
-      return;
-    }
-
-    this.resetCommentReplyState();
-    this.openToolsPostId = null;
-    this.actionSheetPostId = null;
-    this.activeComposer = TOP_LEVEL_COMPOSER;
-  }
-
-  @action
-  openCommentReply(comment, mentionRequired = false) {
-    if (!this.currentUser) {
-      return this.showLogin();
-    }
-
-    if (!this.canCreatePost) {
-      return;
-    }
-
-    const target = this.findCommentByPostId(postKey(comment));
-
-    if (!target) {
-      this.commentReplyError = i18n("video_shorts.comments.reply_target_missing");
-      return;
-    }
-
-    this.commentReplyPostId = postKey(comment);
-    this.commentReplyText = "";
-    this.commentReplyError = null;
-    this.commentReplyNotice = null;
-    this.commentReplyMentionRequired =
-      Boolean(mentionRequired) || this.replyActionUsesMentionLabel(target);
-    this.activeComposer = COMMENT_REPLY_COMPOSER;
-    this.openToolsPostId = null;
-    this.actionSheetPostId = null;
-    this.resetEditingState();
-  }
-
-  @action
-  focusCommentReplyInput() {
-    if (this.commentReplyPostId) {
-      this.activeComposer = COMMENT_REPLY_COMPOSER;
-    }
-  }
-
-  @action
-  deactivateComposerOnFocusOut(event) {
-    const form = event.currentTarget;
-
-    if (form.contains(event.relatedTarget)) {
-      return;
-    }
-
-    requestAnimationFrame(() => {
-      if (
-        !isDestroying(this) &&
-        !isDestroyed(this) &&
-        !form.contains(document.activeElement)
-      ) {
-        this.activeComposer = null;
-      }
-    });
-  }
-
-  @action
-  updateReplyText(event) {
-    this.replyText = event.target.value;
-  }
-
-  @action
-  updateCommentReplyText(event) {
-    this.commentReplyText = event.target.value;
-  }
-
-  @action
-  cancelCommentReply() {
-    this.resetCommentReplyState();
-  }
-
-  @action
-  cancelReply() {
-    this.resetReplyState();
-  }
-
-  @action
-  publishActiveReply(event) {
-    if (this.commentReplyPostId) {
-      return this.publishCommentReply(this.selectedReplyTarget, event);
-    }
-
-    return this.publishReply(event);
-  }
-
-  @action
-  async publishReply(event) {
-    event?.preventDefault();
-
-    if (!this.currentUser) {
-      return this.showLogin();
-    }
-
-    if (!this.canCreatePost) {
-      return;
-    }
-
-    if (!this.trimmedReply) {
-      this.replyError = i18n("video_shorts.comments.reply_empty");
-      return;
-    }
-
-    this.replySubmitting = true;
-    this.replyError = null;
-    this.replyNotice = null;
-
-    try {
-      const result = await createVideoShortsReply({
-        item: this.item,
-        raw: this.trimmedReply,
-        replyToPostNumber: this.item.post_number,
-      });
-
-      if (result.action === "enqueued") {
-        this.replyNotice = i18n("video_shorts.comments.reply_pending");
-        this.replyText = "";
-        return;
-      }
-
-      if (this.hasRenderablePostData(result.post)) {
-        this.prependComment(result.post);
-        this.highlightedPostId = postKey(result.post);
-        this.emitCreatedComment(result.post);
-      } else {
-        await this.refreshCommentsAfterMutation();
-      }
-
-      this.resetReplyState();
-    } catch (error) {
-      this.replyError = videoShortsReplyErrorMessage(error);
-    } finally {
-      this.replySubmitting = false;
-    }
-  }
-
-  @action
-  async publishCommentReply(comment, event) {
-    event?.preventDefault();
-
-    if (!this.currentUser) {
-      return this.showLogin();
-    }
-
-    if (!this.canCreatePost) {
-      return;
-    }
-
-    const target = this.findCommentByPostId(postKey(comment));
-
-    if (!target) {
-      this.commentReplyError = i18n("video_shorts.comments.reply_target_missing");
-      return;
-    }
-
-    if (!this.trimmedCommentReply) {
-      this.commentReplyError = i18n("video_shorts.comments.reply_empty");
-      return;
-    }
-
-    this.commentReplySubmitting = true;
-    this.commentReplyError = null;
-    this.commentReplyNotice = null;
-
-    try {
-      const result = await createVideoShortsReply({
-        item: this.item,
-        raw: this.trimmedCommentReply,
-        replyToPostNumber: target.post_number,
-      });
-
-      if (result.action === "enqueued") {
-        this.commentReplyNotice = i18n("video_shorts.comments.reply_pending");
-        this.commentReplyText = "";
-        return;
-      }
-
-      if (this.hasRenderablePostData(result.post)) {
-        const displayParent = this.visualReplyHostFor(target);
-        const shouldRefreshBranch =
-          !this.hasLoadedReplyBranch(displayParent) &&
-          Number(displayParent?.reply_count || 0) > 0;
-
-        this.appendChildReply(target, result.post);
-        await this.refreshReplyBranchAfterCreate(
-          displayParent,
-          result.post,
-          shouldRefreshBranch
-        );
-        this.highlightedPostId = postKey(result.post);
-        this.emitCreatedComment(result.post);
-      } else {
-        await this.refreshCommentsAfterMutation();
-      }
-
-      this.resetCommentReplyState();
-    } catch (error) {
-      this.commentReplyError = videoShortsReplyErrorMessage(error);
-    } finally {
-      this.commentReplySubmitting = false;
-    }
-  }
-
-  @action
-  async openEdit(comment) {
-    if (!this.currentUser) {
-      return this.showLogin();
-    }
-
-    this.openToolsPostId = null;
-    this.actionSheetPostId = null;
-    this.editingPostId = postKey(comment);
-    this.editingError = null;
-
-    try {
-      const loadedComment = await fetchVideoShortsComment(comment.post_id);
-      this.editingText = loadedComment.raw || "";
-    } catch (error) {
-      this.editingText = comment.raw || "";
-      this.editingError = videoShortsReplyErrorMessage(error);
-    }
-  }
-
-  @action
-  updateEditingText(event) {
-    this.editingText = event.target.value;
-  }
-
-  @action
-  cancelEdit() {
-    this.resetEditingState();
-  }
-
-  @action
-  async saveEdit(comment, event) {
-    event?.preventDefault();
-
-    if (!this.trimmedEdit) {
-      this.editingError = i18n("video_shorts.comments.reply_empty");
-      return;
-    }
-
-    this.editingSubmitting = true;
-    this.editingError = null;
-
-    try {
-      const updatedComment = await updateVideoShortsComment({
-        postId: comment.post_id,
-        raw: this.trimmedEdit,
-      });
-
-      if (
-        !this.hasRenderablePostData(updatedComment) ||
-        !this.replaceComment(updatedComment)
-      ) {
-        await this.refreshCommentsAfterMutation({
-          highlightedPostId: postKey(updatedComment),
-        });
-      }
-
-      this.resetEditingState();
-    } catch (error) {
-      this.editingError = videoShortsReplyErrorMessage(error);
-    } finally {
-      this.editingSubmitting = false;
-    }
-  }
-
-  @action
-  toggleTools(comment, event) {
-    event?.stopPropagation();
-    const key = postKey(comment);
-
-    this.openToolsPostId = this.openToolsPostId === key ? null : key;
-  }
-
-  @action
-  closeTools() {
-    this.openToolsPostId = null;
-  }
-
-  @action
-  openActionSheet(comment, event) {
-    if (isActionSheetInteractiveTarget(event?.target)) {
-      return;
-    }
-
-    this.actionSheetPostId = postKey(comment);
-    this.openToolsPostId = null;
-  }
-
-  @action
-  openActionSheetFromKeyboard(comment, event) {
-    if (event.key !== "Enter" && event.key !== " ") {
-      return;
-    }
-
-    if (isActionSheetInteractiveTarget(event.target)) {
-      return;
-    }
-
-    event.preventDefault();
-    this.openActionSheet(comment, event);
-  }
-
-  @action
-  closeActionSheet() {
-    this.actionSheetPostId = null;
-  }
-
-  @action
-  stopPropagation(event) {
-    event.stopPropagation();
-  }
-
-  @action
-  async copyCommentLink(comment) {
-    this.openToolsPostId = null;
-    this.actionSheetPostId = null;
-
-    if (comment.post_url) {
-      await clipboardCopy(getAbsoluteURL(comment.post_url)).catch(popupAjaxError);
-    }
-  }
-
-  @action
-  openCommentTopic(comment) {
-    this.openToolsPostId = null;
-    this.actionSheetPostId = null;
-
-    if (comment.post_url) {
-      window.open(comment.post_url, "_blank", "noopener,noreferrer");
-    }
-  }
-
-  @action
-  flagComment(comment) {
-    if (!this.currentUser) {
-      return this.showLogin();
-    }
-
-    if (!this.canFlagComment(comment)) {
-      return;
-    }
-
-    this.openToolsPostId = null;
-    this.actionSheetPostId = null;
-    const post = this.commentPostRecord(comment);
-
-    this.modal.show(FlagModal, {
-      model: {
-        flagTarget: new PostFlag(),
-        flagModel: post,
-        setHidden: () => post.set("hidden", true),
-      },
-    });
-  }
-
-  @action
-  deleteComment(comment) {
-    if (!this.canDeleteComment(comment)) {
-      return;
-    }
-
-    this.openToolsPostId = null;
-    this.actionSheetPostId = null;
-    this.dialog.yesNoConfirm({
-      message: i18n("video_shorts.comments.delete_confirm"),
-      didConfirm: async () => {
-        this.deletingPostId = postKey(comment);
-        const sourcePostNumber = Number(this.item?.post_number || 0);
-        const replyToPostNumber = Number(comment?.reply_to_post_number || 0);
-        const isNestedReply =
-          Boolean(sourcePostNumber) &&
-          Boolean(replyToPostNumber) &&
-          replyToPostNumber !== sourcePostNumber;
-        const hasDeletedPlaceholders =
-          this.hasDeletedPlaceholderContext ||
-          this.deletedPlaceholdersForRefresh().length > 0;
-
-        try {
-          const childrenSnapshot = await this.childrenSnapshotForDelete(comment);
-          if (childrenSnapshot.length) {
-            this.hasDeletedPlaceholderContext = true;
-          }
-          await deleteVideoShortsComment(comment.post_id);
-          const mutation = this.removeComment(comment, { childrenSnapshot });
-          this.emitCommentMutation(mutation);
-          if (
-            !mutation.keptPlaceholder &&
-            !hasDeletedPlaceholders &&
-            !isNestedReply
-          ) {
-            await this.refreshCommentsAfterMutation();
-          }
-        } catch (error) {
-          popupAjaxError(error);
-        } finally {
-          this.deletingPostId = null;
-        }
-      },
-    });
-  }
-
   <template>
     <div
       class="video-shorts-comments-surface"
@@ -1812,7 +1876,17 @@ export default class VideoShortsCommentsSurface extends Component {
       data-comments-post-id={{@item.post_id}}
       data-video-shorts-youtube-comments
       {{this.loadForItem @item}}
-      {{this.closeToolsOnOutsideInteraction}}
+      {{this.realtimeForItem
+        @item.topic_id
+        @item.post_id
+        @item.post_number
+        @item.topic_url
+        @item.message_bus_last_id
+      }}
+      {{this.syncReplyCount @replyCount}}
+      {{this.refreshOnReconnect}}
+      {{this.reconcileNativeComposerEdits}}
+      {{this.clearReplyFeedLock}}
     >
       {{#if this.loading}}
         <div class="video-shorts-comments-surface__state">
@@ -1823,1304 +1897,71 @@ export default class VideoShortsCommentsSurface extends Component {
           {{i18n "video_shorts.comments.load_error"}}
         </div>
       {{else}}
-        <ol
-          class="video-shorts-comments-surface__list"
-          data-video-shorts-youtube-thread-list
-        >
-          {{#if this.currentUser}}
-            <li
-              class="video-shorts-comments-surface__top-composer"
-              data-video-shorts-youtube-composer
-            >
+        {{#if this.canUseNativeReply}}
+          <div class="video-shorts-comments-surface__native-toolbar">
+            {{#if this.topLevelReplyOpen}}
               <form
-                class="video-shorts-comments-surface__reply-form"
+                class="video-shorts-comments-surface__reply-editor"
+                data-video-shorts-reply-editor
+                data-reply-kind="top-level"
                 {{on "submit" this.publishReply}}
-                {{on "focusout" this.deactivateComposerOnFocusOut}}
               >
-                <div class="video-shorts-comments-surface__composer-row">
-                  {{#if this.currentUserAvatarUrl}}
-                    <img
-                      class="video-shorts-comments-surface__composer-avatar"
-                      src={{this.currentUserAvatarUrl}}
-                      alt=""
-                    />
-                  {{else}}
-                    <span
-                      class="video-shorts-comments-surface__composer-avatar video-shorts-comments-surface__composer-avatar--placeholder"
-                    ></span>
-                  {{/if}}
-
-                  <div class="video-shorts-comments-surface__composer-body">
-                    <textarea
-                      data-video-shorts-reply-input
-                      data-action="reply"
-                      value={{this.replyText}}
-                      disabled={{this.replySubmitting}}
-                      placeholder={{i18n "video_shorts.comments.reply"}}
-                      {{on "focus" this.openReply}}
-                      {{on "input" this.updateReplyText}}
-                    ></textarea>
-
-                    {{#if this.replyError}}
-                      <p
-                        class="video-shorts-comments-surface__reply-error"
-                        role="alert"
-                      >
-                        {{this.replyError}}
-                      </p>
-                    {{/if}}
-
-                    {{#if this.replyNotice}}
-                      <p class="video-shorts-comments-surface__reply-notice">
-                        {{this.replyNotice}}
-                      </p>
-                    {{/if}}
-
-                    {{#if this.replyActionsVisible}}
-                      <div
-                        class="video-shorts-comments-surface__form-actions"
-                        data-video-shorts-reply-actions
-                      >
-                        <button
-                          type="button"
-                          class="btn-flat"
-                          data-action="cancel-reply"
-                          {{on "click" this.cancelReply}}
-                        >
-                          {{i18n "video_shorts.comments.cancel"}}
-                        </button>
-                        <button
-                          type="submit"
-                          class="btn btn-primary"
-                          data-action="publish-reply"
-                          disabled={{this.replySubmitting}}
-                        >
-                          {{if
-                            this.replySubmitting
-                            (i18n "video_shorts.comments.publishing")
-                            (i18n "video_shorts.comments.publish")
-                          }}
-                        </button>
-                      </div>
-                    {{/if}}
-                  </div>
+                <textarea
+                  data-video-shorts-reply-input
+                  value={{this.replyText}}
+                  disabled={{this.replySubmitting}}
+                  placeholder={{i18n "video_shorts.comments.reply"}}
+                  {{this.focusInput}}
+                  {{on "input" this.updateReplyText}}
+                ></textarea>
+                {{#if this.replyError}}
+                  <p class="video-shorts-comments-surface__reply-error" role="alert">{{this.replyError}}</p>
+                {{/if}}
+                <div class="video-shorts-comments-surface__reply-editor-actions">
+                  <button type="button" class="btn-flat" data-video-shorts-reply-cancel {{on "click" this.cancelReply}}>
+                    {{i18n "video_shorts.comments.cancel"}}
+                  </button>
+                  <button type="submit" class="btn btn-primary" data-video-shorts-reply-submit disabled={{this.replySubmitDisabled}}>
+                    {{i18n "video_shorts.comments.publish"}}
+                  </button>
                 </div>
               </form>
-            </li>
-          {{/if}}
-
-          {{#each this.comments as |comment|}}
-            <li
-              class="video-shorts-comments-surface__comment"
-              data-post-id={{comment.post_id}}
-              data-post-number={{comment.post_number}}
-              data-highlighted={{if
-                (eq this.highlightedPostId (postKey comment))
-                "true"
-                "false"
-              }}
-            >
-              <article
-                class="video-shorts-comments-surface__comment-card"
+            {{else}}
+              <button
+                type="button"
+                class="video-shorts-comments-surface__composer-entry"
+                data-action="native-top-level-reply"
+                data-video-shorts-top-level-composer-entry
+                {{on "click" this.openNativeTopLevelReply}}
               >
-                <a
-                  class="video-shorts-comments-surface__avatar-link"
-                  href={{this.userPathFor comment}}
-                  data-user-card={{this.displayName comment}}
-                >
-                  <img
-                    class="video-shorts-comments-surface__avatar"
-                    src={{this.avatarUrl comment 48}}
-                    alt=""
-                    loading="lazy"
-                  />
-                </a>
+                <span class="video-shorts-comments-surface__composer-placeholder">
+                  {{i18n "video_shorts.comments.add_comment"}}
+                </span>
+              </button>
+            {{/if}}
+          </div>
+        {{/if}}
 
-                <div class="video-shorts-comments-surface__comment-main">
-                  <div class="video-shorts-comments-surface__comment-header">
-                    <a
-                      class="video-shorts-comments-surface__username"
-                      href={{this.userPathFor comment}}
-                      data-user-card={{this.displayName comment}}
-                    >
-                      @{{this.displayName comment}}
-                    </a>
+        <ol
+          class="video-shorts-comments-surface__list video-shorts-comments-surface__list--native"
+          data-video-shorts-youtube-thread-list
+        >
+          {{#each this.comments as |comment|}}
+            <NativeCommentRow
+              @comment={{comment}}
+              @depth={{0}}
+              @surface={{this}}
+            />
 
-                    {{#if comment.created_at}}
-                      <time
-                        class="video-shorts-comments-surface__time"
-                        datetime={{comment.created_at}}
-                      >
-                        {{dFormatDate comment.created_at leaveAgo="true"}}
-                      </time>
-                    {{/if}}
-                  </div>
-
-                  {{#if (eq this.editingPostId (postKey comment))}}
-                    <form
-                      class="video-shorts-comments-surface__edit-input"
-                      {{on "submit" (fn this.saveEdit comment)}}
-                    >
-                      <textarea
-                        data-video-shorts-edit-input
-                        value={{this.editingText}}
-                        disabled={{this.editingSubmitting}}
-                        {{this.focusInput}}
-                        {{on "input" this.updateEditingText}}
-                      ></textarea>
-
-                      {{#if this.editingError}}
-                        <p class="video-shorts-comments-surface__reply-error" role="alert">
-                          {{this.editingError}}
-                        </p>
-                      {{/if}}
-
-                      <div class="video-shorts-comments-surface__form-actions">
-                        <button
-                          type="button"
-                          class="btn-flat"
-                          data-action="cancel-edit"
-                          {{on "click" this.cancelEdit}}
-                        >
-                          {{i18n "video_shorts.comments.cancel"}}
-                        </button>
-                        <button
-                          type="submit"
-                          class="btn btn-primary"
-                          data-action="save-edit"
-                          disabled={{this.editingSubmitting}}
-                        >
-                          {{if
-                            this.editingSubmitting
-                            (i18n "video_shorts.comments.saving")
-                            (i18n "video_shorts.comments.save")
-                          }}
-                        </button>
-                      </div>
-                    </form>
-                  {{else}}
-                    <div
-                      class="video-shorts-comments-surface__cooked"
-                      role="button"
-                      tabindex="0"
-                      {{on "click" (fn this.openActionSheet comment)}}
-                      {{on
-                        "keydown"
-                        (fn this.openActionSheetFromKeyboard comment)
-                      }}
-                    >
-                      {{#if (this.replyDisplayTargetLabel comment)}}
-                        <span
-                          class="video-shorts-comments-surface__reply-target-label"
-                          data-video-shorts-reply-target
-                        >
-                          {{this.replyDisplayTargetLabel comment}}
-                        </span>
-                      {{/if}}
-                      {{trustHTML comment.cooked}}
-                    </div>
-                  {{/if}}
-
-                  <div class="video-shorts-comments-surface__comment-actions">
-                    <button
-                      type="button"
-                      class="video-shorts-comments-surface__text-action"
-                      data-action="reply-to-comment"
-                      data-post-id={{comment.post_id}}
-                      {{on "click" (fn this.openCommentReply comment true)}}
-                    >
-                      {{i18n "video_shorts.comments.reply"}}
-                    </button>
-
-                    <div class="video-shorts-comments-surface__tools">
-                      <button
-                        type="button"
-                        class="video-shorts-comments-surface__tools-trigger"
-                        title={{i18n "video_shorts.comments.tools"}}
-                        aria-label={{i18n "video_shorts.comments.tools"}}
-                        aria-expanded={{if
-                          (eq this.openToolsPostId (postKey comment))
-                          "true"
-                          "false"
-                        }}
-                        data-action="comment-tools-toggle"
-                        data-post-id={{comment.post_id}}
-                        {{on "click" (fn this.toggleTools comment)}}
-                      >
-                        {{dIcon "ellipsis-vertical"}}
-                      </button>
-
-                      {{#if (eq this.openToolsPostId (postKey comment))}}
-                        <div
-                          class="video-shorts-comments-surface__tools-menu"
-                          data-video-shorts-comment-tools-menu={{comment.post_id}}
-                          role="menu"
-                          {{on "click" this.stopPropagation}}
-                        >
-                          {{#if (this.canEditComment comment)}}
-                            <button
-                              type="button"
-                              role="menuitem"
-                              data-action="edit-comment"
-                              {{on "click" (fn this.openEdit comment)}}
-                            >
-                              {{dIcon "pencil"}}
-                              <span>{{i18n "video_shorts.comments.edit"}}</span>
-                            </button>
-                          {{/if}}
-
-                          {{#if comment.post_url}}
-                            <button
-                              type="button"
-                              role="menuitem"
-                              data-action="copy-comment-link"
-                              {{on "click" (fn this.copyCommentLink comment)}}
-                            >
-                              {{dIcon "link"}}
-                              <span>{{i18n "video_shorts.comments.copy_link"}}</span>
-                            </button>
-                            <button
-                              type="button"
-                              role="menuitem"
-                              data-action="open-comment-topic"
-                              {{on "click" (fn this.openCommentTopic comment)}}
-                            >
-                              {{dIcon "up-right-from-square"}}
-                              <span>{{i18n "video_shorts.comments.open_in_topic"}}</span>
-                            </button>
-                          {{/if}}
-
-                          {{#if (this.canFlagComment comment)}}
-                            <button
-                              type="button"
-                              role="menuitem"
-                              data-action="flag-comment"
-                              {{on "click" (fn this.flagComment comment)}}
-                            >
-                              {{dIcon "flag"}}
-                              <span>{{i18n "video_shorts.comments.report"}}</span>
-                            </button>
-                          {{/if}}
-
-                          {{#if (this.canDeleteComment comment)}}
-                            <button
-                              type="button"
-                              role="menuitem"
-                              class="danger"
-                              data-action="delete-comment"
-                              disabled={{eq this.deletingPostId (postKey comment)}}
-                              {{on "click" (fn this.deleteComment comment)}}
-                            >
-                              {{dIcon "trash-can"}}
-                              <span>{{i18n "video_shorts.comments.delete"}}</span>
-                            </button>
-                          {{/if}}
-                        </div>
-                      {{/if}}
-                    </div>
-                  </div>
-
-                  {{#if (eq this.commentReplyPostId (postKey comment))}}
-                    <div class="video-shorts-comments-surface__comment-reply-marker">
-                      <span data-video-shorts-reply-target>
-                        {{this.commentReplyStatus}}
-                      </span>
-                    </div>
-                  {{/if}}
-
-                  <CommentBranchControls
-                    @comment={{comment}}
-                    @surface={{this}}
-                  />
-
-                  {{#if (this.hasChildReplies comment)}}
-                    <ol
-                      class="video-shorts-comments-surface__child-list"
-                      data-video-shorts-child-list
-                    >
-                      {{#each (this.visualRepliesFor comment) as |childReply|}}
-                        <li
-                          class="video-shorts-comments-surface__child-comment"
-                          data-post-id={{childReply.post_id}}
-                          data-post-number={{childReply.post_number}}
-                          data-highlighted={{if
-                            (eq this.highlightedPostId (postKey childReply))
-                            "true"
-                            "false"
-                          }}
-                        >
-                          <a
-                            class="video-shorts-comments-surface__avatar-link video-shorts-comments-surface__avatar-link--small"
-                            href={{this.userPathFor childReply}}
-                            data-user-card={{this.displayName childReply}}
-                          >
-                            <img
-                              class="video-shorts-comments-surface__avatar video-shorts-comments-surface__avatar--small"
-                              src={{this.avatarUrl childReply 32}}
-                              alt=""
-                              loading="lazy"
-                            />
-                          </a>
-
-                          <div class="video-shorts-comments-surface__comment-main">
-                            <div class="video-shorts-comments-surface__comment-header">
-                              <a
-                                class="video-shorts-comments-surface__username"
-                                href={{this.userPathFor childReply}}
-                                data-user-card={{this.displayName childReply}}
-                              >
-                                @{{this.displayName childReply}}
-                              </a>
-                              {{#if childReply.created_at}}
-                                <time
-                                  class="video-shorts-comments-surface__time"
-                                  datetime={{childReply.created_at}}
-                                >
-                                  {{dFormatDate childReply.created_at leaveAgo="true"}}
-                                </time>
-                              {{/if}}
-                            </div>
-
-                            {{#if (eq this.editingPostId (postKey childReply))}}
-                              <form
-                                class="video-shorts-comments-surface__edit-input"
-                                {{on "submit" (fn this.saveEdit childReply)}}
-                              >
-                                <textarea
-                                  data-video-shorts-edit-input
-                                  value={{this.editingText}}
-                                  disabled={{this.editingSubmitting}}
-                                  {{this.focusInput}}
-                                  {{on "input" this.updateEditingText}}
-                                ></textarea>
-
-                                {{#if this.editingError}}
-                                  <p
-                                    class="video-shorts-comments-surface__reply-error"
-                                    role="alert"
-                                  >
-                                    {{this.editingError}}
-                                  </p>
-                                {{/if}}
-
-                                <div class="video-shorts-comments-surface__form-actions">
-                                  <button
-                                    type="button"
-                                    class="btn-flat"
-                                    data-action="cancel-edit"
-                                    {{on "click" this.cancelEdit}}
-                                  >
-                                    {{i18n "video_shorts.comments.cancel"}}
-                                  </button>
-                                  <button
-                                    type="submit"
-                                    class="btn btn-primary"
-                                    data-action="save-edit"
-                                    disabled={{this.editingSubmitting}}
-                                  >
-                                    {{if
-                                      this.editingSubmitting
-                                      (i18n "video_shorts.comments.saving")
-                                      (i18n "video_shorts.comments.save")
-                                    }}
-                                  </button>
-                                </div>
-                              </form>
-                            {{else}}
-                              <div
-                                class="video-shorts-comments-surface__cooked"
-                                role="button"
-                                tabindex="0"
-                                {{on "click" (fn this.openActionSheet childReply)}}
-                                {{on
-                                  "keydown"
-                                  (fn
-                                    this.openActionSheetFromKeyboard
-                                    childReply
-                                  )
-                                }}
-                              >
-                                {{#if (this.replyDisplayTargetLabel childReply)}}
-                                  <span
-                                    class="video-shorts-comments-surface__reply-target-label"
-                                    data-video-shorts-reply-target
-                                  >
-                                    {{this.replyDisplayTargetLabel childReply}}
-                                  </span>
-                                {{/if}}
-                                {{trustHTML childReply.cooked}}
-                              </div>
-                            {{/if}}
-
-                            <div class="video-shorts-comments-surface__comment-actions">
-                              <button
-                                type="button"
-                                class="video-shorts-comments-surface__text-action"
-                                data-action="reply-to-comment"
-                                data-post-id={{childReply.post_id}}
-                                {{on "click" (fn this.openCommentReply childReply true)}}
-                              >
-                                {{i18n "video_shorts.comments.reply"}}
-                              </button>
-
-                              <div class="video-shorts-comments-surface__tools">
-                                <button
-                                  type="button"
-                                  class="video-shorts-comments-surface__tools-trigger"
-                                  title={{i18n "video_shorts.comments.tools"}}
-                                  aria-label={{i18n "video_shorts.comments.tools"}}
-                                  aria-expanded={{if
-                                    (eq this.openToolsPostId (postKey childReply))
-                                    "true"
-                                    "false"
-                                  }}
-                                  data-action="comment-tools-toggle"
-                                  data-post-id={{childReply.post_id}}
-                                  {{on "click" (fn this.toggleTools childReply)}}
-                                >
-                                  {{dIcon "ellipsis-vertical"}}
-                                </button>
-
-                                {{#if (eq this.openToolsPostId (postKey childReply))}}
-                                  <div
-                                    class="video-shorts-comments-surface__tools-menu"
-                                    data-video-shorts-comment-tools-menu={{childReply.post_id}}
-                                    role="menu"
-                                    {{on "click" this.stopPropagation}}
-                                  >
-                                    {{#if (this.canEditComment childReply)}}
-                                      <button
-                                        type="button"
-                                        role="menuitem"
-                                        data-action="edit-comment"
-                                        {{on "click" (fn this.openEdit childReply)}}
-                                      >
-                                        {{dIcon "pencil"}}
-                                        <span>{{i18n "video_shorts.comments.edit"}}</span>
-                                      </button>
-                                    {{/if}}
-
-                                    {{#if childReply.post_url}}
-                                      <button
-                                        type="button"
-                                        role="menuitem"
-                                        data-action="copy-comment-link"
-                                        {{on "click" (fn this.copyCommentLink childReply)}}
-                                      >
-                                        {{dIcon "link"}}
-                                        <span>{{i18n "video_shorts.comments.copy_link"}}</span>
-                                      </button>
-                                      <button
-                                        type="button"
-                                        role="menuitem"
-                                        data-action="open-comment-topic"
-                                        {{on "click" (fn this.openCommentTopic childReply)}}
-                                      >
-                                        {{dIcon "up-right-from-square"}}
-                                        <span>{{i18n "video_shorts.comments.open_in_topic"}}</span>
-                                      </button>
-                                    {{/if}}
-
-                                    {{#if (this.canFlagComment childReply)}}
-                                      <button
-                                        type="button"
-                                        role="menuitem"
-                                        data-action="flag-comment"
-                                        {{on "click" (fn this.flagComment childReply)}}
-                                      >
-                                        {{dIcon "flag"}}
-                                        <span>{{i18n "video_shorts.comments.report"}}</span>
-                                      </button>
-                                    {{/if}}
-
-                                    {{#if (this.canDeleteComment childReply)}}
-                                      <button
-                                        type="button"
-                                        role="menuitem"
-                                        class="danger"
-                                        data-action="delete-comment"
-                                        disabled={{eq
-                                          this.deletingPostId
-                                          (postKey childReply)
-                                        }}
-                                        {{on "click" (fn this.deleteComment childReply)}}
-                                      >
-                                        {{dIcon "trash-can"}}
-                                        <span>{{i18n "video_shorts.comments.delete"}}</span>
-                                      </button>
-                                    {{/if}}
-                                  </div>
-                                {{/if}}
-                              </div>
-                            </div>
-
-                            {{#if (eq this.commentReplyPostId (postKey childReply))}}
-                              <div
-                                class="video-shorts-comments-surface__comment-reply-marker"
-                              >
-                                <span data-video-shorts-reply-target>
-                                  {{this.commentReplyStatus}}
-                                </span>
-                              </div>
-                            {{/if}}
-
-                            <CommentBranchControls
-                              @comment={{childReply}}
-                              @surface={{this}}
-                            />
-
-                            {{#if (this.hasChildReplies childReply)}}
-                              <ol
-                                class="video-shorts-comments-surface__child-list"
-                                data-video-shorts-child-list
-                              >
-                                {{#each
-                                  (this.childRepliesFor childReply)
-                                  as |grandchildReply|
-                                }}
-                                  <li
-                                    class="video-shorts-comments-surface__child-comment video-shorts-comments-surface__child-comment--nested"
-                                    data-post-id={{grandchildReply.post_id}}
-                                    data-post-number={{grandchildReply.post_number}}
-                                    data-highlighted={{if
-                                      (eq this.highlightedPostId (postKey grandchildReply))
-                                      "true"
-                                      "false"
-                                    }}
-                                  >
-                                    <a
-                                      class="video-shorts-comments-surface__avatar-link video-shorts-comments-surface__avatar-link--small"
-                                      href={{this.userPathFor grandchildReply}}
-                                      data-user-card={{this.displayName grandchildReply}}
-                                    >
-                                      <img
-                                        class="video-shorts-comments-surface__avatar video-shorts-comments-surface__avatar--small"
-                                        src={{this.avatarUrl grandchildReply 32}}
-                                        alt=""
-                                        loading="lazy"
-                                      />
-                                    </a>
-
-                                    <div class="video-shorts-comments-surface__comment-main">
-                                      <div
-                                        class="video-shorts-comments-surface__comment-header"
-                                      >
-                                        <a
-                                          class="video-shorts-comments-surface__username"
-                                          href={{this.userPathFor grandchildReply}}
-                                          data-user-card={{this.displayName grandchildReply}}
-                                        >
-                                          @{{this.displayName grandchildReply}}
-                                        </a>
-                                        {{#if grandchildReply.created_at}}
-                                          <time
-                                            class="video-shorts-comments-surface__time"
-                                            datetime={{grandchildReply.created_at}}
-                                          >
-                                            {{dFormatDate
-                                              grandchildReply.created_at
-                                              leaveAgo="true"
-                                            }}
-                                          </time>
-                                        {{/if}}
-                                      </div>
-
-                                      {{#if
-                                        (eq
-                                          this.editingPostId
-                                          (postKey grandchildReply)
-                                        )
-                                      }}
-                                        <form
-                                          class="video-shorts-comments-surface__edit-input"
-                                          {{on
-                                            "submit"
-                                            (fn this.saveEdit grandchildReply)
-                                          }}
-                                        >
-                                          <textarea
-                                            data-video-shorts-edit-input
-                                            value={{this.editingText}}
-                                            disabled={{this.editingSubmitting}}
-                                            {{this.focusInput}}
-                                            {{on "input" this.updateEditingText}}
-                                          ></textarea>
-
-                                          {{#if this.editingError}}
-                                            <p
-                                              class="video-shorts-comments-surface__reply-error"
-                                              role="alert"
-                                            >
-                                              {{this.editingError}}
-                                            </p>
-                                          {{/if}}
-
-                                          <div
-                                            class="video-shorts-comments-surface__form-actions"
-                                          >
-                                            <button
-                                              type="button"
-                                              class="btn-flat"
-                                              data-action="cancel-edit"
-                                              {{on "click" this.cancelEdit}}
-                                            >
-                                              {{i18n "video_shorts.comments.cancel"}}
-                                            </button>
-                                            <button
-                                              type="submit"
-                                              class="btn btn-primary"
-                                              data-action="save-edit"
-                                              disabled={{this.editingSubmitting}}
-                                            >
-                                              {{if
-                                                this.editingSubmitting
-                                                (i18n "video_shorts.comments.saving")
-                                                (i18n "video_shorts.comments.save")
-                                              }}
-                                            </button>
-                                          </div>
-                                        </form>
-                                      {{else}}
-                                        <div
-                                          class="video-shorts-comments-surface__cooked"
-                                          role="button"
-                                          tabindex="0"
-                                          {{on
-                                            "click"
-                                            (fn
-                                              this.openActionSheet
-                                              grandchildReply
-                                            )
-                                          }}
-                                          {{on
-                                            "keydown"
-                                            (fn
-                                              this.openActionSheetFromKeyboard
-                                              grandchildReply
-                                            )
-                                          }}
-                                        >
-                                          {{#if
-                                            (this.replyDisplayTargetLabel
-                                              grandchildReply)
-                                          }}
-                                            <span
-                                              class="video-shorts-comments-surface__reply-target-label"
-                                              data-video-shorts-reply-target
-                                            >
-                                              {{this.replyDisplayTargetLabel
-                                                grandchildReply
-                                              }}
-                                            </span>
-                                          {{/if}}
-                                          {{trustHTML grandchildReply.cooked}}
-                                        </div>
-                                      {{/if}}
-
-                                      <div
-                                        class="video-shorts-comments-surface__comment-actions"
-                                      >
-                                        <button
-                                          type="button"
-                                          class="video-shorts-comments-surface__text-action"
-                                          data-action="reply-to-comment"
-                                          data-post-id={{grandchildReply.post_id}}
-                                          {{on
-                                            "click"
-                                              (fn
-                                                this.openCommentReply
-                                                grandchildReply
-                                                true
-                                              )
-                                          }}
-                                        >
-                                          {{i18n "video_shorts.comments.reply"}}
-                                        </button>
-
-                                        <div class="video-shorts-comments-surface__tools">
-                                          <button
-                                            type="button"
-                                            class="video-shorts-comments-surface__tools-trigger"
-                                            title={{i18n
-                                              "video_shorts.comments.tools"
-                                            }}
-                                            aria-label={{i18n
-                                              "video_shorts.comments.tools"
-                                            }}
-                                            aria-expanded={{if
-                                              (eq
-                                                this.openToolsPostId
-                                                (postKey grandchildReply)
-                                              )
-                                              "true"
-                                              "false"
-                                            }}
-                                            data-action="comment-tools-toggle"
-                                            data-post-id={{grandchildReply.post_id}}
-                                            {{on
-                                              "click"
-                                              (fn this.toggleTools grandchildReply)
-                                            }}
-                                          >
-                                            {{dIcon "ellipsis-vertical"}}
-                                          </button>
-
-                                          {{#if
-                                            (eq
-                                              this.openToolsPostId
-                                              (postKey grandchildReply)
-                                            )
-                                          }}
-                                            <div
-                                              class="video-shorts-comments-surface__tools-menu"
-                                              data-video-shorts-comment-tools-menu={{grandchildReply.post_id}}
-                                              role="menu"
-                                              {{on "click" this.stopPropagation}}
-                                            >
-                                              {{#if
-                                                (this.canEditComment grandchildReply)
-                                              }}
-                                                <button
-                                                  type="button"
-                                                  role="menuitem"
-                                                  data-action="edit-comment"
-                                                  {{on
-                                                    "click"
-                                                    (fn this.openEdit grandchildReply)
-                                                  }}
-                                                >
-                                                  {{dIcon "pencil"}}
-                                                  <span>{{i18n
-                                                      "video_shorts.comments.edit"
-                                                    }}</span>
-                                                </button>
-                                              {{/if}}
-
-                                              {{#if grandchildReply.post_url}}
-                                                <button
-                                                  type="button"
-                                                  role="menuitem"
-                                                  data-action="copy-comment-link"
-                                                  {{on
-                                                    "click"
-                                                    (fn
-                                                      this.copyCommentLink
-                                                      grandchildReply
-                                                    )
-                                                  }}
-                                                >
-                                                  {{dIcon "link"}}
-                                                  <span>{{i18n
-                                                      "video_shorts.comments.copy_link"
-                                                    }}</span>
-                                                </button>
-                                                <button
-                                                  type="button"
-                                                  role="menuitem"
-                                                  data-action="open-comment-topic"
-                                                  {{on
-                                                    "click"
-                                                    (fn
-                                                      this.openCommentTopic
-                                                      grandchildReply
-                                                    )
-                                                  }}
-                                                >
-                                                  {{dIcon "up-right-from-square"}}
-                                                  <span>{{i18n
-                                                      "video_shorts.comments.open_in_topic"
-                                                    }}</span>
-                                                </button>
-                                              {{/if}}
-
-                                              {{#if
-                                                (this.canFlagComment grandchildReply)
-                                              }}
-                                                <button
-                                                  type="button"
-                                                  role="menuitem"
-                                                  data-action="flag-comment"
-                                                  {{on
-                                                    "click"
-                                                    (fn
-                                                      this.flagComment
-                                                      grandchildReply
-                                                    )
-                                                  }}
-                                                >
-                                                  {{dIcon "flag"}}
-                                                  <span>{{i18n
-                                                      "video_shorts.comments.report"
-                                                    }}</span>
-                                                </button>
-                                              {{/if}}
-
-                                              {{#if
-                                                (this.canDeleteComment
-                                                  grandchildReply)
-                                              }}
-                                                <button
-                                                  type="button"
-                                                  role="menuitem"
-                                                  class="danger"
-                                                  data-action="delete-comment"
-                                                  disabled={{eq
-                                                    this.deletingPostId
-                                                    (postKey grandchildReply)
-                                                  }}
-                                                  {{on
-                                                    "click"
-                                                    (fn
-                                                      this.deleteComment
-                                                      grandchildReply
-                                                    )
-                                                  }}
-                                                >
-                                                  {{dIcon "trash-can"}}
-                                                  <span>{{i18n
-                                                      "video_shorts.comments.delete"
-                                                    }}</span>
-                                                </button>
-                                              {{/if}}
-                                            </div>
-                                          {{/if}}
-                                        </div>
-                                      </div>
-
-                                      {{#if
-                                        (eq
-                                          this.commentReplyPostId
-                                          (postKey grandchildReply)
-                                        )
-                                      }}
-                                        <div
-                                          class="video-shorts-comments-surface__comment-reply-marker"
-                                        >
-                                          <span data-video-shorts-reply-target>
-                                            {{this.commentReplyStatus}}
-                                          </span>
-                                        </div>
-                                      {{/if}}
-
-                                      <CommentBranchControls
-                                        @comment={{grandchildReply}}
-                                        @surface={{this}}
-                                      />
-
-                                      {{#if
-                                        (this.hasChildReplies grandchildReply)
-                                      }}
-                                        <ol
-                                          class="video-shorts-comments-surface__child-list video-shorts-comments-surface__child-list--deep"
-                                          data-video-shorts-child-list
-                                        >
-                                          {{#each
-                                            (this.deepRepliesFor grandchildReply)
-                                            as |deepReply|
-                                          }}
-                                            <li
-                                              class="video-shorts-comments-surface__child-comment video-shorts-comments-surface__child-comment--nested video-shorts-comments-surface__child-comment--deep"
-                                              data-post-id={{deepReply.post_id}}
-                                              data-post-number={{deepReply.post_number}}
-                                              data-highlighted={{if
-                                                (eq
-                                                  this.highlightedPostId
-                                                  (postKey deepReply)
-                                                )
-                                                "true"
-                                                "false"
-                                              }}
-                                            >
-                                              <a
-                                                class="video-shorts-comments-surface__avatar-link video-shorts-comments-surface__avatar-link--small"
-                                                href={{this.userPathFor deepReply}}
-                                                data-user-card={{this.displayName
-                                                  deepReply
-                                                }}
-                                              >
-                                                <img
-                                                  class="video-shorts-comments-surface__avatar video-shorts-comments-surface__avatar--small"
-                                                  src={{this.avatarUrl
-                                                    deepReply
-                                                    32
-                                                  }}
-                                                  alt=""
-                                                  loading="lazy"
-                                                />
-                                              </a>
-
-                                              <div
-                                                class="video-shorts-comments-surface__comment-main"
-                                              >
-                                                <div
-                                                  class="video-shorts-comments-surface__comment-header"
-                                                >
-                                                  <a
-                                                    class="video-shorts-comments-surface__username"
-                                                    href={{this.userPathFor
-                                                      deepReply
-                                                    }}
-                                                    data-user-card={{this.displayName
-                                                      deepReply
-                                                    }}
-                                                  >
-                                                    @{{this.displayName
-                                                      deepReply
-                                                    }}
-                                                  </a>
-                                                  {{#if deepReply.created_at}}
-                                                    <time
-                                                      class="video-shorts-comments-surface__time"
-                                                      datetime={{deepReply.created_at}}
-                                                    >
-                                                      {{dFormatDate
-                                                        deepReply.created_at
-                                                        leaveAgo="true"
-                                                      }}
-                                                    </time>
-                                                  {{/if}}
-                                                </div>
-
-                                                {{#if
-                                                  (eq
-                                                    this.editingPostId
-                                                    (postKey deepReply)
-                                                  )
-                                                }}
-                                                  <form
-                                                    class="video-shorts-comments-surface__edit-input"
-                                                    {{on
-                                                      "submit"
-                                                      (fn
-                                                        this.saveEdit
-                                                        deepReply
-                                                      )
-                                                    }}
-                                                  >
-                                                    <textarea
-                                                      data-video-shorts-edit-input
-                                                      value={{this.editingText}}
-                                                      disabled={{this.editingSubmitting}}
-                                                      {{this.focusInput}}
-                                                      {{on
-                                                        "input"
-                                                        this.updateEditingText
-                                                      }}
-                                                    ></textarea>
-
-                                                    {{#if this.editingError}}
-                                                      <p
-                                                        class="video-shorts-comments-surface__reply-error"
-                                                        role="alert"
-                                                      >
-                                                        {{this.editingError}}
-                                                      </p>
-                                                    {{/if}}
-
-                                                    <div
-                                                      class="video-shorts-comments-surface__form-actions"
-                                                    >
-                                                      <button
-                                                        type="button"
-                                                        class="btn-flat"
-                                                        data-action="cancel-edit"
-                                                        {{on
-                                                          "click"
-                                                          this.cancelEdit
-                                                        }}
-                                                      >
-                                                        {{i18n
-                                                          "video_shorts.comments.cancel"
-                                                        }}
-                                                      </button>
-                                                      <button
-                                                        type="submit"
-                                                        class="btn btn-primary"
-                                                        data-action="save-edit"
-                                                        disabled={{this.editingSubmitting}}
-                                                      >
-                                                        {{if
-                                                          this.editingSubmitting
-                                                          (i18n
-                                                            "video_shorts.comments.saving"
-                                                          )
-                                                          (i18n
-                                                            "video_shorts.comments.save"
-                                                          )
-                                                        }}
-                                                      </button>
-                                                    </div>
-                                                  </form>
-                                                {{else}}
-                                                  <div
-                                                    class="video-shorts-comments-surface__cooked"
-                                                    role="button"
-                                                    tabindex="0"
-                                                    {{on
-                                                      "click"
-                                                      (fn
-                                                        this.openActionSheet
-                                                        deepReply
-                                                      )
-                                                    }}
-                                                    {{on
-                                                      "keydown"
-                                                      (fn
-                                                        this.openActionSheetFromKeyboard
-                                                        deepReply
-                                                      )
-                                                    }}
-                                                  >
-                                                    {{#if
-                                                      (this.replyDisplayTargetLabel
-                                                        deepReply)
-                                                    }}
-                                                      <span
-                                                        class="video-shorts-comments-surface__reply-target-label"
-                                                        data-video-shorts-reply-target
-                                                      >
-                                                        {{this.replyDisplayTargetLabel
-                                                          deepReply
-                                                        }}
-                                                      </span>
-                                                    {{/if}}
-                                                    {{trustHTML
-                                                      deepReply.cooked
-                                                    }}
-                                                  </div>
-                                                {{/if}}
-
-                                                <div
-                                                  class="video-shorts-comments-surface__comment-actions"
-                                                >
-                                                  <button
-                                                    type="button"
-                                                    class="video-shorts-comments-surface__text-action"
-                                                    data-action="reply-to-comment"
-                                                    data-post-id={{deepReply.post_id}}
-                                                    {{on
-                                                      "click"
-                                                      (fn
-                                                        this.openCommentReply
-                                                        deepReply
-                                                        true
-                                                      )
-                                                    }}
-                                                  >
-                                                    {{i18n
-                                                      "video_shorts.comments.reply"
-                                                    }}
-                                                  </button>
-
-                                                  <div
-                                                    class="video-shorts-comments-surface__tools"
-                                                  >
-                                                    <button
-                                                      type="button"
-                                                      class="video-shorts-comments-surface__tools-trigger"
-                                                      title={{i18n
-                                                        "video_shorts.comments.tools"
-                                                      }}
-                                                      aria-label={{i18n
-                                                        "video_shorts.comments.tools"
-                                                      }}
-                                                      aria-expanded={{if
-                                                        (eq
-                                                          this.openToolsPostId
-                                                          (postKey deepReply)
-                                                        )
-                                                        "true"
-                                                        "false"
-                                                      }}
-                                                      data-action="comment-tools-toggle"
-                                                      data-post-id={{deepReply.post_id}}
-                                                      {{on
-                                                        "click"
-                                                        (fn
-                                                          this.toggleTools
-                                                          deepReply
-                                                        )
-                                                      }}
-                                                    >
-                                                      {{dIcon
-                                                        "ellipsis-vertical"
-                                                      }}
-                                                    </button>
-
-                                                    {{#if
-                                                      (eq
-                                                        this.openToolsPostId
-                                                        (postKey deepReply)
-                                                      )
-                                                    }}
-                                                      <div
-                                                        class="video-shorts-comments-surface__tools-menu"
-                                                        data-video-shorts-comment-tools-menu={{deepReply.post_id}}
-                                                        role="menu"
-                                                        {{on
-                                                          "click"
-                                                          this.stopPropagation
-                                                        }}
-                                                      >
-                                                        {{#if
-                                                          (this.canEditComment
-                                                            deepReply)
-                                                        }}
-                                                          <button
-                                                            type="button"
-                                                            role="menuitem"
-                                                            data-action="edit-comment"
-                                                            {{on
-                                                              "click"
-                                                              (fn
-                                                                this.openEdit
-                                                                deepReply
-                                                              )
-                                                            }}
-                                                          >
-                                                            {{dIcon "pencil"}}
-                                                            <span>{{i18n
-                                                                "video_shorts.comments.edit"
-                                                              }}</span>
-                                                          </button>
-                                                        {{/if}}
-
-                                                        {{#if deepReply.post_url}}
-                                                          <button
-                                                            type="button"
-                                                            role="menuitem"
-                                                            data-action="copy-comment-link"
-                                                            {{on
-                                                              "click"
-                                                              (fn
-                                                                this.copyCommentLink
-                                                                deepReply
-                                                              )
-                                                            }}
-                                                          >
-                                                            {{dIcon "link"}}
-                                                            <span>{{i18n
-                                                                "video_shorts.comments.copy_link"
-                                                              }}</span>
-                                                          </button>
-                                                          <button
-                                                            type="button"
-                                                            role="menuitem"
-                                                            data-action="open-comment-topic"
-                                                            {{on
-                                                              "click"
-                                                              (fn
-                                                                this.openCommentTopic
-                                                                deepReply
-                                                              )
-                                                            }}
-                                                          >
-                                                            {{dIcon
-                                                              "up-right-from-square"
-                                                            }}
-                                                            <span>{{i18n
-                                                                "video_shorts.comments.open_in_topic"
-                                                              }}</span>
-                                                          </button>
-                                                        {{/if}}
-
-                                                        {{#if
-                                                          (this.canFlagComment
-                                                            deepReply)
-                                                        }}
-                                                          <button
-                                                            type="button"
-                                                            role="menuitem"
-                                                            data-action="flag-comment"
-                                                            {{on
-                                                              "click"
-                                                              (fn
-                                                                this.flagComment
-                                                                deepReply
-                                                              )
-                                                            }}
-                                                          >
-                                                            {{dIcon "flag"}}
-                                                            <span>{{i18n
-                                                                "video_shorts.comments.report"
-                                                              }}</span>
-                                                          </button>
-                                                        {{/if}}
-
-                                                        {{#if
-                                                          (this.canDeleteComment
-                                                            deepReply)
-                                                        }}
-                                                          <button
-                                                            type="button"
-                                                            role="menuitem"
-                                                            class="danger"
-                                                            data-action="delete-comment"
-                                                            disabled={{eq
-                                                              this.deletingPostId
-                                                              (postKey deepReply)
-                                                            }}
-                                                            {{on
-                                                              "click"
-                                                              (fn
-                                                                this.deleteComment
-                                                                deepReply
-                                                              )
-                                                            }}
-                                                          >
-                                                            {{dIcon
-                                                              "trash-can"
-                                                            }}
-                                                            <span>{{i18n
-                                                                "video_shorts.comments.delete"
-                                                              }}</span>
-                                                          </button>
-                                                        {{/if}}
-                                                      </div>
-                                                    {{/if}}
-                                                  </div>
-                                                </div>
-
-                                                {{#if
-                                                  (eq
-                                                    this.commentReplyPostId
-                                                    (postKey deepReply)
-                                                  )
-                                                }}
-                                                  <div
-                                                    class="video-shorts-comments-surface__comment-reply-marker"
-                                                  >
-                                                    <span
-                                                      data-video-shorts-reply-target
-                                                    >
-                                                      {{this.commentReplyStatus}}
-                                                    </span>
-                                                  </div>
-                                                {{/if}}
-
-                                                <CommentBranchControls
-                                                  @comment={{deepReply}}
-                                                  @surface={{this}}
-                                                />
-                                              </div>
-                                            </li>
-                                          {{/each}}
-                                        </ol>
-                                      {{/if}}
-                                    </div>
-                                  </li>
-                                {{/each}}
-                              </ol>
-                            {{/if}}
-
-                          </div>
-                        </li>
-                      {{/each}}
-                    </ol>
-                  {{/if}}
-                </div>
-              </article>
-            </li>
+            {{#if (this.hasExpandedReplies comment)}}
+              {{#each (this.visualRepliesFor comment) as |reply|}}
+                <NativeCommentRow
+                  @comment={{reply}}
+                  @depth={{1}}
+                  @surface={{this}}
+                />
+              {{/each}}
+            {{/if}}
           {{else}}
             <li class="video-shorts-comments-surface__state">
               {{i18n "video_shorts.comments.empty"}}
@@ -3141,227 +1982,6 @@ export default class VideoShortsCommentsSurface extends Component {
               (i18n "video_shorts.comments.load_more")
             }}
           </button>
-        {{/if}}
-
-        {{#if this.selectedActionSheetComment}}
-          <div
-            class="video-shorts-comments-surface__action-sheet"
-            data-video-shorts-comment-action-sheet
-            data-post-id={{this.selectedActionSheetComment.post_id}}
-            role="menu"
-            {{on "click" this.stopPropagation}}
-          >
-            {{#if (this.canShowReplyAction this.selectedActionSheetComment)}}
-              <button
-                type="button"
-                role="menuitem"
-                data-action="reply-to-comment"
-                {{on
-                  "click"
-                  (fn
-                    this.openCommentReply
-                    this.selectedActionSheetComment
-                    (this.replyActionUsesMentionLabel
-                      this.selectedActionSheetComment
-                    )
-                  )
-                }}
-              >
-                {{dIcon "reply"}}
-                <span>{{i18n "video_shorts.comments.reply"}}</span>
-              </button>
-            {{/if}}
-
-            {{#if (this.canShowEditAction this.selectedActionSheetComment)}}
-              <button
-                type="button"
-                role="menuitem"
-                data-action="edit-comment"
-                {{on "click" (fn this.openEdit this.selectedActionSheetComment)}}
-              >
-                {{dIcon "pencil"}}
-                <span>{{i18n "video_shorts.comments.edit"}}</span>
-              </button>
-            {{/if}}
-
-            {{#if (this.hasCommentLinkAction this.selectedActionSheetComment)}}
-              <button
-                type="button"
-                role="menuitem"
-                data-action="copy-comment-link"
-                {{on
-                  "click"
-                  (fn this.copyCommentLink this.selectedActionSheetComment)
-                }}
-              >
-                {{dIcon "link"}}
-                <span>{{i18n "video_shorts.comments.copy_link"}}</span>
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                data-action="open-comment-topic"
-                {{on
-                  "click"
-                  (fn this.openCommentTopic this.selectedActionSheetComment)
-                }}
-              >
-                {{dIcon "up-right-from-square"}}
-                <span>{{i18n "video_shorts.comments.open_in_topic"}}</span>
-              </button>
-            {{/if}}
-
-            {{#if (this.canShowFlagAction this.selectedActionSheetComment)}}
-              <button
-                type="button"
-                role="menuitem"
-                data-action="flag-comment"
-                {{on "click" (fn this.flagComment this.selectedActionSheetComment)}}
-              >
-                {{dIcon "flag"}}
-                <span>{{i18n "video_shorts.comments.report"}}</span>
-              </button>
-            {{/if}}
-
-            {{#if (this.canShowDeleteAction this.selectedActionSheetComment)}}
-              <button
-                type="button"
-                role="menuitem"
-                class="danger"
-                data-action="delete-comment"
-                disabled={{eq
-                  this.deletingPostId
-                  (postKey this.selectedActionSheetComment)
-                }}
-                {{on
-                  "click"
-                  (fn this.deleteComment this.selectedActionSheetComment)
-                }}
-              >
-                {{dIcon "trash-can"}}
-                <span>{{i18n "video_shorts.comments.delete"}}</span>
-              </button>
-            {{/if}}
-          </div>
-        {{/if}}
-      {{/if}}
-
-      {{#if this.currentUser}}
-        {{#if this.commentReplyPostId}}
-          <button
-            type="button"
-            class="video-shorts-comments-surface__reply-dialog-backdrop"
-            aria-label={{i18n "video_shorts.comments.cancel"}}
-            {{on "click" this.cancelCommentReply}}
-          ></button>
-
-        <div
-          class="video-shorts-comments-surface__reply-dialog"
-          data-video-shorts-comment-reply-dialog
-          role="dialog"
-          aria-modal="false"
-          aria-label={{this.commentReplyDialogLabel}}
-        >
-          <form
-            class="video-shorts-comments-surface__reply-form"
-            {{on "submit" this.publishActiveReply}}
-            {{on "focusout" this.deactivateComposerOnFocusOut}}
-          >
-            <div class="video-shorts-comments-surface__composer-row">
-              {{#if this.currentUserAvatarUrl}}
-                <img
-                  class="video-shorts-comments-surface__composer-avatar"
-                  src={{this.currentUserAvatarUrl}}
-                  alt=""
-                />
-              {{else}}
-                <span
-                  class="video-shorts-comments-surface__composer-avatar video-shorts-comments-surface__composer-avatar--placeholder"
-                ></span>
-              {{/if}}
-
-              <div class="video-shorts-comments-surface__composer-body">
-                {{#if this.commentReplyStatus}}
-                  <div
-                    class="video-shorts-comments-surface__comment-reply-status"
-                    data-video-shorts-comment-reply-status
-                  >
-                    <span data-video-shorts-reply-target>
-                      {{this.commentReplyStatus}}
-                    </span>
-                    <button
-                      type="button"
-                      data-action="cancel-comment-reply"
-                      aria-label={{i18n
-                        "video_shorts.comments.cancel_reply_to"
-                        username=this.selectedReplyUsernameLabel
-                      }}
-                      {{on "click" this.cancelCommentReply}}
-                    >
-                      {{dIcon "xmark"}}
-                    </button>
-                  </div>
-                {{/if}}
-
-                <textarea
-                  data-video-shorts-comment-reply-input
-                  data-action="reply"
-                  value={{this.commentReplyText}}
-                  disabled={{this.commentReplySubmitting}}
-                  placeholder={{this.commentReplyPlaceholder}}
-                  {{this.focusInput}}
-                  {{on "focus" this.focusCommentReplyInput}}
-                  {{on "input" this.updateCommentReplyText}}
-                ></textarea>
-
-                {{#if this.commentReplyError}}
-                  <p
-                    class="video-shorts-comments-surface__comment-reply-error"
-                    role="alert"
-                  >
-                    {{this.commentReplyError}}
-                  </p>
-                {{/if}}
-
-                {{#if this.commentReplyNotice}}
-                  <p
-                    class="video-shorts-comments-surface__comment-reply-notice"
-                  >
-                    {{this.commentReplyNotice}}
-                  </p>
-                {{/if}}
-
-                {{#if this.commentReplyActionsVisible}}
-                  <div
-                    class="video-shorts-comments-surface__form-actions"
-                    data-video-shorts-comment-reply-actions
-                  >
-                    <button
-                      type="button"
-                      class="btn-flat"
-                      data-action="cancel-comment-reply"
-                      {{on "click" this.cancelCommentReply}}
-                    >
-                      {{i18n "video_shorts.comments.cancel"}}
-                    </button>
-                    <button
-                      type="submit"
-                      class="btn btn-primary"
-                      data-action="publish-comment-reply"
-                      disabled={{this.commentReplySubmitting}}
-                    >
-                      {{if
-                        this.commentReplySubmitting
-                        (i18n "video_shorts.comments.publishing")
-                        (i18n "video_shorts.comments.publish")
-                      }}
-                    </button>
-                  </div>
-                {{/if}}
-              </div>
-            </div>
-          </form>
-        </div>
         {{/if}}
       {{/if}}
     </div>

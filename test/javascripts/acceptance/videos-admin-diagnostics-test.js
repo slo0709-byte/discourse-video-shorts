@@ -1,10 +1,17 @@
 import { click, currentURL, visit } from "@ember/test-helpers";
 import { test } from "qunit";
+import pretender, {
+  pretenderHelpers,
+} from "discourse/tests/helpers/create-pretender";
 import {
   acceptance,
   updateCurrentUser,
 } from "discourse/tests/helpers/qunit-helpers";
 import { i18n } from "discourse-i18n";
+
+function setupPretender(callback) {
+  callback(pretender, pretenderHelpers());
+}
 
 function diagnosticsPayload(sampleTitle = "YouTube sample", samples = null) {
   return {
@@ -15,6 +22,19 @@ function diagnosticsPayload(sampleTitle = "YouTube sample", samples = null) {
       configured_page_size: 20,
       configured_candidate_scan_limit: 500,
       debug_mode: false,
+    },
+    delivery: {
+      native_uploads: {
+        object_storage_enabled: false,
+        s3_cdn_url: null,
+        s3_cdn_for_all_uploads: false,
+        site_cdn_url: null,
+      },
+      hls: {
+        requires_https: true,
+        allowed_origins: ["https://stream.example.com"],
+        media_csp_sources: ["'self'", "blob:", "https://stream.example.com"],
+      },
     },
     sources: {
       configured: {
@@ -76,7 +96,7 @@ acceptance("Video Shorts admin diagnostics", function (needs) {
     updateCurrentUser({ admin: true });
     let requests = 0;
 
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/admin/plugins/discourse-video-shorts.json", () =>
         helper.response({
           id: "discourse-video-shorts",
@@ -111,12 +131,17 @@ acceptance("Video Shorts admin diagnostics", function (needs) {
       currentURL(),
       "/admin/plugins/discourse-video-shorts/diagnostics",
     );
-    assert
-      .dom(".admin-plugin-config-page__top-nav-item")
-      .includesText(i18n("admin.plugins.change_settings_short"));
-    assert
-      .dom(".admin-plugin-config-page__top-nav-item")
-      .includesText(i18n("video_shorts.admin.diagnostics.title"));
+    const navLabels = [
+      ...document.querySelectorAll(".admin-plugin-config-page__top-nav-item"),
+    ].map((item) => item.textContent.trim());
+    assert.true(
+      navLabels.includes(i18n("admin.plugins.change_settings_short")),
+      "the native settings tab remains available",
+    );
+    assert.true(
+      navLabels.includes(i18n("video_shorts.admin.diagnostics.title")),
+      "the diagnostics tab is available",
+    );
     assert.dom(".video-shorts-admin-diagnostics").exists();
     assert
       .dom(".video-shorts-admin-diagnostics")
@@ -126,6 +151,12 @@ acceptance("Video Shorts admin diagnostics", function (needs) {
     assert
       .dom(".video-shorts-admin-diagnostics")
       .includesText("iframe_candidate");
+    assert
+      .dom(".video-shorts-admin-diagnostics")
+      .includesText(i18n("video_shorts.admin.diagnostics.delivery"));
+    assert
+      .dom(".video-shorts-admin-diagnostics")
+      .includesText("https://stream.example.com");
     assert.dom(".video-shorts-admin-diagnostics").includesText("Video clips");
     assert.dom(".video-shorts-admin-diagnostics").includesText("video");
     assert.dom(".video-shorts-admin-diagnostics").includesText("shorts");
@@ -157,7 +188,7 @@ acceptance("Video Shorts admin diagnostics", function (needs) {
   test("renders warning and empty states", async function (assert) {
     updateCurrentUser({ admin: true });
 
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/admin/plugins/discourse-video-shorts.json", () =>
         helper.response({
           id: "discourse-video-shorts",
@@ -237,7 +268,7 @@ acceptance("Video Shorts admin diagnostics", function (needs) {
     updateCurrentUser({ admin: true });
     let requests = 0;
 
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/admin/plugins/discourse-video-shorts.json", () =>
         helper.response({
           id: "discourse-video-shorts",
@@ -282,7 +313,7 @@ acceptance("Video Shorts admin diagnostics", function (needs) {
   test("renders a top-level empty state for malformed diagnostics payloads", async function (assert) {
     updateCurrentUser({ admin: true });
 
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/admin/plugins/discourse-video-shorts.json", () =>
         helper.response({
           id: "discourse-video-shorts",

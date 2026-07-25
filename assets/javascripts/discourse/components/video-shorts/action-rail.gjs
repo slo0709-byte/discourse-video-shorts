@@ -10,15 +10,15 @@ import { ajax } from "discourse/lib/ajax";
 import { popupAjaxError } from "discourse/lib/ajax-error";
 import { BookmarkFormData } from "discourse/lib/bookmark-form-data";
 import PostFlag from "discourse/lib/flag-targets/post-flag";
-import Composer from "discourse/models/composer";
 import { not } from "discourse/truth-helpers";
 import dIcon from "discourse/ui-kit/helpers/d-icon";
 import { i18n } from "discourse-i18n";
 import VideoShortsCommentsSheet from "discourse/plugins/discourse-video-shorts/discourse/components/modal/video-shorts-comments-sheet";
+import { videoShortsNativePost } from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-native-post";
+import { createVideoShortsNativeTopic } from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-native-topic";
 
 export default class VideoShortsActionRail extends Component {
   @service bookmarkApi;
-  @service composer;
   @service currentUser;
   @service modal;
   @service site;
@@ -29,6 +29,10 @@ export default class VideoShortsActionRail extends Component {
   @tracked bookmarkId = this.args.item?.actions?.bookmark_id || null;
   @tracked likeCountValue = this.args.item?.counts?.like_count || 0;
   @tracked bookmarkCountValue = this.args.item?.counts?.bookmark_count || 0;
+
+  nativeTopicIdentity = null;
+  nativeTopic = null;
+  nativePostRecords = new Map();
 
   get likeCount() {
     return this.formatCount(this.likeCountValue);
@@ -103,29 +107,45 @@ export default class VideoShortsActionRail extends Component {
       ?.id;
   }
 
-  get topicRecord() {
-    return this.store.createRecord("topic", {
-      id: this.args.item.topic_id,
-      title: this.args.item.title,
-      fancy_title: this.args.item.title,
-      draft_key: `topic_${this.args.item.topic_id}`,
-      draft_sequence: 0,
-      details: {
-        can_create_post: this.canReply,
-      },
-    });
+  nativeTopicRecord() {
+    const identity = `${this.args.item.topic_id}:${this.args.item.post_id}`;
+
+    if (!this.nativeTopic || this.nativeTopicIdentity !== identity) {
+      this.nativeTopic = createVideoShortsNativeTopic(
+        this.args.item,
+        this.store
+      );
+      this.nativeTopicIdentity = identity;
+      this.nativePostRecords = new Map();
+    }
+
+    return this.nativeTopic;
   }
 
-  get postRecord() {
-    return this.store.createRecord("post", {
-      id: this.args.item.post_id,
-      post_number: this.args.item.post_number,
-      username: this.args.item.username,
-      topic_id: this.args.item.topic_id,
-      topic_slug: this.args.item.topic_url?.split("/")[2],
-      topic: this.topicRecord,
-      actions_summary: this.args.item.native_action_summary || [],
-      hidden: false,
+  nativePostRecord() {
+    const item = this.args.item;
+
+    return videoShortsNativePost({
+      comment: {
+        id: item.post_id,
+        post_id: item.post_id,
+        post_number: item.post_number,
+        topic_id: item.topic_id,
+        username: item.username,
+        name: item.name,
+        avatar_template: item.avatar_template,
+        cooked: item.excerpt || "",
+        created_at: item.created_at,
+        post_url: item.post_url,
+        reply_count: item.counts?.reply_count || 0,
+        actions_summary: item.native_action_summary || [],
+        can_flag: this.canFlag,
+        hidden: false,
+      },
+      item,
+      topic: this.nativeTopicRecord(),
+      store: this.store,
+      records: this.nativePostRecords,
     });
   }
 
@@ -207,34 +227,12 @@ export default class VideoShortsActionRail extends Component {
   }
 
   @action
-  openComposerReply() {
-    if (!this.currentUser) {
-      return this.showLogin();
-    }
-
-    if (!this.canReply) {
-      return;
-    }
-
-    this.composer.open({
-      action: Composer.REPLY,
-      draftKey: `topic_${this.args.item.topic_id}`,
-      draftSequence: 0,
-      post: this.args.item.post_number === 1 ? null : this.postRecord,
-      skipJumpOnSave: true,
-      topic: this.topicRecord,
-    });
-  }
-
-  @action
   openComments(event) {
     event?.preventDefault();
 
     if (this.args.onOpenComments) {
       this.args.onOpenComments({
         item: this.args.item,
-        opener: event?.currentTarget,
-        onReply: this.openComposerReply,
       });
       return;
     }
@@ -242,8 +240,8 @@ export default class VideoShortsActionRail extends Component {
     this.modal.show(VideoShortsCommentsSheet, {
       model: {
         item: this.args.item,
-        opener: event?.currentTarget,
-        onReply: this.openComposerReply,
+        replyCount: () =>
+          this.args.replyCount ?? this.args.item?.counts?.reply_count ?? 0,
       },
     });
   }
@@ -254,8 +252,8 @@ export default class VideoShortsActionRail extends Component {
 
     this.modal.show(ShareTopicModal, {
       model: {
-        topic: this.topicRecord,
-        post: this.postRecord,
+        topic: this.nativeTopicRecord(),
+        post: this.nativePostRecord(),
         allowInvites: false,
       },
     });
@@ -271,7 +269,7 @@ export default class VideoShortsActionRail extends Component {
       return;
     }
 
-    const post = this.postRecord;
+    const post = this.nativePostRecord();
 
     this.modal.show(FlagModal, {
       model: {

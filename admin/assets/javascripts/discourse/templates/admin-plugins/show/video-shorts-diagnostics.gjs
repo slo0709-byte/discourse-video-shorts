@@ -65,6 +65,33 @@ export default <template>
       </section>
 
       <section class="video-shorts-admin-diagnostics__section">
+        <h3>{{i18n "video_shorts.admin.diagnostics.delivery"}}</h3>
+        <dl class="video-shorts-admin-diagnostics__summary">
+          <dt>{{i18n "video_shorts.admin.diagnostics.hls_requires_https"}}</dt>
+          <dd>
+            {{#if @controller.model.delivery.hls.requires_https}}
+              {{i18n "video_shorts.admin.diagnostics.enabled_yes"}}
+            {{else}}
+              {{i18n "video_shorts.admin.diagnostics.enabled_no"}}
+            {{/if}}
+          </dd>
+
+          <dt>{{i18n "video_shorts.admin.diagnostics.hls_allowed_origins"}}</dt>
+          <dd>
+            {{#if @controller.model.delivery.hls.allowed_origins.length}}
+              <ul class="video-shorts-admin-diagnostics__source-list">
+                {{#each @controller.model.delivery.hls.allowed_origins as |origin|}}
+                  <li>{{origin}}</li>
+                {{/each}}
+              </ul>
+            {{else}}
+              {{i18n "video_shorts.admin.diagnostics.none_configured"}}
+            {{/if}}
+          </dd>
+        </dl>
+      </section>
+
+      <section class="video-shorts-admin-diagnostics__section">
         <h3>{{i18n "video_shorts.admin.diagnostics.sources"}}</h3>
         <dl class="video-shorts-admin-diagnostics__summary">
           <dt>{{i18n "video_shorts.admin.diagnostics.configured_categories"}}</dt>

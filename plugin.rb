@@ -2,9 +2,9 @@
 
 # name: discourse-video-shorts
 # about: Adds a Shorts-style video feed page backed by Discourse posts.
-# version: 0.1.0
+# version: 0.2.0
 # authors: GPTaku
-# url: https://example.invalid/discourse-video-shorts
+# url: https://github.com/slo0709-byte/discourse-video-shorts
 
 enabled_site_setting :video_shorts_enabled
 
@@ -14,51 +14,49 @@ register_svg_icon "arrows-rotate"
 register_svg_icon "triangle-exclamation"
 register_svg_icon "up-right-from-square"
 register_svg_icon "video"
+register_svg_icon "volume-high"
+register_svg_icon "volume-xmark"
 
 add_admin_route "video_shorts.admin.title", "discourse-video-shorts", use_new_show_route: true
-
-extend_content_security_policy(
-  frame_src: %w[
-    'self'
-    https:
-    http:
-    https://www.youtube.com
-    https://www.youtube-nocookie.com
-    https://player.bilibili.com
-    https://player.vimeo.com
-  ],
-)
 
 module ::DiscourseVideoShorts
   PLUGIN_NAME = "discourse-video-shorts"
 
-  module ContentSecurityPolicyFrameSrcExtension
+  module ContentSecurityPolicySourceExtension
     private
 
     def extendable?(directive)
-      directive == :frame_src || super
+      %i[frame_src media_src].include?(directive) || super
     end
   end
 end
+
+require_relative "lib/discourse_video_shorts/hls_origin_policy"
+
+extend_content_security_policy(::DiscourseVideoShorts::ContentSecurityPolicyExtension.new)
 
 require_relative "lib/discourse_video_shorts/engine"
 
 after_initialize do
   require "content_security_policy/builder"
   require_relative "lib/discourse_video_shorts/admin/diagnostics"
+  require_relative "lib/discourse_video_shorts/comment_branch_replies"
+  require_relative "lib/discourse_video_shorts/comment_count"
+  require_relative "lib/discourse_video_shorts/direct_comments"
   require_relative "lib/discourse_video_shorts/feed"
   require_relative "lib/discourse_video_shorts/media_extractor"
   require_relative "lib/discourse_video_shorts/media_extractor_cache"
   require_relative "lib/discourse_video_shorts/source_selection"
   require_relative "app/controllers/discourse_video_shorts/admin/diagnostics_controller"
+  require_relative "app/controllers/discourse_video_shorts/comments_controller"
   require_relative "app/controllers/discourse_video_shorts/videos_controller"
 
   if defined?(::ContentSecurityPolicy::Builder) &&
        !::ContentSecurityPolicy::Builder.ancestors.include?(
-         ::DiscourseVideoShorts::ContentSecurityPolicyFrameSrcExtension
+         ::DiscourseVideoShorts::ContentSecurityPolicySourceExtension
        )
     ::ContentSecurityPolicy::Builder.prepend(
-      ::DiscourseVideoShorts::ContentSecurityPolicyFrameSrcExtension
+      ::DiscourseVideoShorts::ContentSecurityPolicySourceExtension
     )
   end
 

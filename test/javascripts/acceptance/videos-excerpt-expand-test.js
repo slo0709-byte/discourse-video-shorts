@@ -1,9 +1,18 @@
 import { click, currentURL, visit } from "@ember/test-helpers";
 import { test } from "qunit";
+import pretender, {
+  pretenderHelpers,
+} from "discourse/tests/helpers/create-pretender";
 import { acceptance } from "discourse/tests/helpers/qunit-helpers";
 
 const LONG_EXCERPT =
   "This is a deliberately long video summary that should be shortened before expansion.";
+const EXCERPT_LIMIT = 24;
+const COLLAPSED_EXCERPT = `${LONG_EXCERPT.slice(0, EXCERPT_LIMIT).trimEnd()}...`;
+
+function setupPretender(callback) {
+  callback(pretender, pretenderHelpers());
+}
 
 function feedItem(excerpt = LONG_EXCERPT) {
   return {
@@ -46,11 +55,11 @@ function feedItem(excerpt = LONG_EXCERPT) {
 acceptance("Video Shorts excerpt expansion", function (needs) {
   needs.settings({
     video_shorts_enabled: true,
-    video_shorts_excerpt_character_limit: 24,
+    video_shorts_excerpt_character_limit: EXCERPT_LIMIT,
   });
 
   test("truncates long excerpts to the configured character limit and expands in place", async function (assert) {
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
           items: [feedItem()],
@@ -65,7 +74,7 @@ acceptance("Video Shorts excerpt expansion", function (needs) {
     assert.strictEqual(currentURL(), "/videos");
     assert
       .dom(".video-shorts-metadata__excerpt-text")
-      .hasText("This is a deliberately...");
+      .hasText(COLLAPSED_EXCERPT);
     assert
       .dom(".video-shorts-metadata__excerpt-expand")
       .hasText("Show more", "long excerpts expose an expand control");
@@ -83,14 +92,14 @@ acceptance("Video Shorts excerpt expansion", function (needs) {
     assert.strictEqual(currentURL(), "/videos");
     assert
       .dom(".video-shorts-metadata__excerpt-text")
-      .hasText("This is a deliberately...");
+      .hasText(COLLAPSED_EXCERPT);
     assert
       .dom(".video-shorts-metadata__excerpt-expand")
       .hasText("Show more", "collapsed excerpts expose expand again");
   });
 
   test("does not render an expand button when the excerpt fits the configured limit", async function (assert) {
-    needs.pretender((server, helper) => {
+    setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
           items: [feedItem("Short summary")],

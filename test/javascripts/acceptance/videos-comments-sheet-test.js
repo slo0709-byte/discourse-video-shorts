@@ -1,15 +1,14 @@
 import {
-  blur,
   click,
   currentURL,
   fillIn,
-  focus,
   settled,
   triggerKeyEvent,
   visit,
   waitUntil,
 } from "@ember/test-helpers";
 import { test } from "qunit";
+import AnonymousFlagModal from "discourse/components/modal/anonymous-flag";
 import FlagModal from "discourse/components/modal/flag";
 import PostFlag from "discourse/lib/flag-targets/post-flag";
 import pretender, {
@@ -78,11 +77,86 @@ function directReply(id, username, cooked, attrs = {}) {
 }
 
 function postParams(request) {
-  return new URLSearchParams(request.requestBody);
+  const body = request.requestBody || "";
+  const data = body.startsWith("{")
+    ? JSON.parse(body)
+    : Object.fromEntries(new URLSearchParams(body));
+
+  return {
+    get(key) {
+      return data[key] === undefined || data[key] === null
+        ? null
+        : String(data[key]);
+    },
+  };
 }
 
 function setupPretender(callback) {
-  callback(pretender, pretenderHelpers());
+  const helpers = pretenderHelpers();
+  const repliesByPostId = new Map();
+  let hasExplicitBranchHandler = false;
+  const server = new Proxy(pretender, {
+    get(target, property) {
+      if (property === "get") {
+        return (path, handler, ...args) => {
+          const directRepliesMatch = path.match(
+            /^\/posts\/(\d+)\/replies\.json$/,
+          );
+
+          if (directRepliesMatch) {
+            repliesByPostId.set(directRepliesMatch[1], handler);
+          } else if (path === "/video-shorts/comments/replies.json") {
+            hasExplicitBranchHandler = true;
+          }
+
+          return target.get(path, handler, ...args);
+        };
+      }
+
+      const value = Reflect.get(target, property);
+
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+
+  callback(server, helpers);
+
+  if (!hasExplicitBranchHandler) {
+    pretender.get("/video-shorts/comments/replies.json", (request) => {
+      const handler = repliesByPostId.get(request.queryParams.post_id);
+
+      if (!handler) {
+        return helpers.response(404, { error: "not_found" });
+      }
+
+      const normalizeResponse = (response) => {
+        const [status, headers, posts] = response;
+
+        if (status !== 200 || !Array.isArray(posts)) {
+          return response;
+        }
+
+        return [
+          status,
+          headers,
+          {
+            posts,
+            has_more: false,
+            next_after: posts.at(-1)?.post_number || null,
+          },
+        ];
+      };
+      const response = handler(request);
+
+      return typeof response?.then === "function"
+        ? response.then(normalizeResponse)
+        : normalizeResponse(response);
+    });
+  }
+}
+
+function nativeCreateResponse(post) {
+  return { success: true, action: "create_post", post };
 }
 
 function deferredResponse() {
@@ -94,6 +168,36 @@ function deferredResponse() {
   return { promise, resolve };
 }
 
+async function waitForStableRect(element, maxFrames = 30) {
+  let previousRect;
+
+  for (let frame = 0; frame < maxFrames; frame += 1) {
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+
+    const rect = element.getBoundingClientRect();
+    const currentRect = {
+      height: rect.height,
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+    };
+
+    if (
+      previousRect &&
+      currentRect.height === previousRect.height &&
+      currentRect.left === previousRect.left &&
+      currentRect.top === previousRect.top &&
+      currentRect.width === previousRect.width
+    ) {
+      return rect;
+    }
+
+    previousRect = currentRect;
+  }
+
+  throw new Error(`Element geometry did not stabilize within ${maxFrames} frames`);
+}
+
 function viewRepliesSelector(postId) {
   return `[data-post-id="${postId}"] [data-video-shorts-view-replies]`;
 }
@@ -102,12 +206,49 @@ function loadMoreRepliesSelector(postId) {
   return `[data-post-id="${postId}"] [data-video-shorts-load-more-replies]`;
 }
 
-function childListSelector(postId) {
-  return `[data-post-id="${postId}"] > .video-shorts-comments-surface__comment-card [data-video-shorts-child-list]`;
+function childListSelector() {
+  return '[data-video-shorts-native-comment][data-depth="1"]';
 }
 
 function rowActionSelector(postId, action) {
-  return `[data-post-id="${postId}"] [data-action="${action}"]`;
+  const nativeAction =
+    action === "reply" ? ".post-action-menu__reply" : ".post-menu-area";
+
+  return `[data-post-id="${postId}"] ${nativeAction}`;
+}
+
+function nativePostSelector(postId) {
+  return `[data-video-shorts-native-comment][data-post-id="${postId}"]`;
+}
+
+function nativePostActionSelector(postId, action) {
+  return `${nativePostSelector(postId)} .post-action-menu__${action}, [data-content] .post-action-menu__${action}`;
+}
+
+async function revealNativePostActions(postId) {
+  await clickIfPresent(`${nativePostSelector(postId)} .show-more-actions`);
+}
+
+function replyEditorSelector(postId = null) {
+  return postId === null
+    ? '[data-video-shorts-reply-editor][data-reply-kind="top-level"]'
+    : `.video-shorts-comments-surface__comment[data-post-id="${postId}"] [data-video-shorts-inline-reply-editor][data-reply-kind="nested"]`;
+}
+
+async function openLightweightReplyEditor(postId = null) {
+  if (postId === null) {
+    await click('[data-action="native-top-level-reply"]');
+  } else {
+    await click(nativePostActionSelector(postId, "reply"));
+  }
+
+  await waitUntil(() => document.querySelector(replyEditorSelector(postId)));
+}
+
+async function publishLightweightReply(raw, postId = null) {
+  const editor = replyEditorSelector(postId);
+  await fillIn(`${editor} [data-video-shorts-reply-input]`, raw);
+  await click(`${editor} [data-video-shorts-reply-submit]`);
 }
 
 function assertViewRepliesControl(assert, postId, label, ariaLabel) {
@@ -118,10 +259,23 @@ function assertViewRepliesControl(assert, postId, label, ariaLabel) {
 }
 
 function assertRowActions(assert, postId) {
-  assert.dom(rowActionSelector(postId, "reply-to-comment")).exists();
+  assert.dom(rowActionSelector(postId, "reply")).exists();
   assert
-    .dom(rowActionSelector(postId, "comment-tools-toggle"))
-    .hasAttribute("aria-label", "Comment tools");
+    .dom(rowActionSelector(postId, "post-menu"))
+    .exists("the native PostMenu remains available for this reply");
+}
+
+function assertNativePostContract(assert, postId, depth = null) {
+  const selector = nativePostSelector(postId);
+
+  assert.dom(selector).exists();
+  assert.dom(`${selector} article.boxed[data-post-id="${postId}"]`).exists();
+  assert.dom(`${selector} .cooked`).exists();
+  assert.dom(`${selector} .post-menu-area`).exists();
+
+  if (depth !== null) {
+    assert.dom(selector).hasAttribute("data-depth", String(depth));
+  }
 }
 
 async function clickIfPresent(selector) {
@@ -204,7 +358,11 @@ acceptance("Video Shorts comments sheet", function (needs) {
     assert.dom("[data-action='sort-recent']").doesNotExist();
 
     const commentsText = () =>
-      [...document.querySelectorAll(".video-shorts-comments-surface__cooked")]
+      [
+        ...document.querySelectorAll(
+          ".video-shorts-comments-surface .topic-post .cooked",
+        ),
+      ]
         .map((node) => node.textContent.trim())
         .filter(Boolean);
 
@@ -213,7 +371,7 @@ acceptance("Video Shorts comments sheet", function (needs) {
       ["Most liked comment", "Newest comment"],
       "comments keep the source order returned by Discourse",
     );
-    assert.dom(".post-action-menu").doesNotExist();
+    assert.dom(".video-shorts-comments-surface .post-menu-area").exists();
     assert.dom("#reply-control.open").doesNotExist();
   });
 
@@ -248,7 +406,7 @@ acceptance("Video Shorts comments sheet", function (needs) {
     );
   });
 
-  test("baseline keeps comments open, native tools, publish, and delete paths reachable", async function (assert) {
+  test("baseline keeps native PostMenu, reply editor, and delete paths reachable", async function (assert) {
     let publishRequests = 0;
 
     setupPretender((server, helper) => {
@@ -279,14 +437,22 @@ acceptance("Video Shorts comments sheet", function (needs) {
 
         assert.strictEqual(params.get("topic_id"), "126");
         assert.strictEqual(params.get("raw"), "Baseline published reply");
-        assert.strictEqual(params.get("reply_to_post_number"), "1");
+        assert.strictEqual(params.get("reply_to_post_number"), null);
 
         return helper.response(
-          directReply(247, "admin_user", "<p>Baseline published reply</p>", {
-            post_number: 3,
-            raw: "Baseline published reply",
-            post_url: "/t/baseline-actions/126/3",
-          }),
+          nativeCreateResponse(
+            directReply(
+              91247,
+              "admin_user",
+              "<p>Baseline published reply</p>",
+              {
+                post_number: 3,
+                raw: "Baseline published reply",
+                topic_id: 126,
+                post_url: "/t/baseline-actions/126/3",
+              },
+            ),
+          ),
         );
       });
     });
@@ -294,34 +460,30 @@ acceptance("Video Shorts comments sheet", function (needs) {
     await visit("/videos");
     await click("[data-action='open-comments']");
 
-    assert.dom(".video-shorts-comments-sheet").exists();
+    assert.dom(".video-shorts-comments-panel").exists();
     assert
       .dom('.video-shorts-comments-surface__comment[data-post-id="246"]')
       .includesText("Baseline tool target");
+    assertNativePostContract(assert, 246, 0);
 
-    await focus("[data-video-shorts-reply-input]");
-    await fillIn("[data-video-shorts-reply-input]", "Baseline published reply");
-    await click("[data-action='publish-reply']");
+    await openLightweightReplyEditor();
+    await publishLightweightReply("Baseline published reply");
 
     assert.strictEqual(
       publishRequests,
       1,
       "the top-level publish path remains reachable from the comments sheet",
     );
-    assert
-      .dom('.video-shorts-comments-surface__comment[data-post-id="247"]')
-      .includesText("Baseline published reply");
+    assert.dom("#reply-control.open").doesNotExist();
+    assert.dom(".video-shorts-comments-panel").exists();
 
-    await click('[data-post-id="246"] [data-action="comment-tools-toggle"]');
+    await revealNativePostActions(246);
 
+    assert.dom(`${nativePostSelector(246)} .post-menu-area`).exists();
     assert
-      .dom('[data-video-shorts-comment-tools-menu="246"]')
-      .exists("native comment tools still render");
-    assert
-      .dom('[data-post-id="246"] [data-action="delete-comment"]')
+      .dom(nativePostActionSelector(246, "delete"))
       .exists("the native delete action path remains reachable");
     assert.dom("#reply-control.open").doesNotExist();
-    assert.dom(".post-action-menu").doesNotExist();
   });
 
   test("RED lazy replies: opening comments leaves child branches collapsed and unfetched", async function (assert) {
@@ -389,7 +551,7 @@ acceptance("Video Shorts comments sheet", function (needs) {
     await click("[data-action='open-comments']");
 
     assert
-      .dom(".video-shorts-comments-surface__comment")
+      .dom('[data-video-shorts-native-comment][data-depth="0"]')
       .exists({ count: 2 }, "top-level comments still open normally");
     assert.strictEqual(
       parentBranchCalls,
@@ -402,7 +564,9 @@ acceptance("Video Shorts comments sheet", function (needs) {
       "opening comments does not fan out to grandchild /posts/:id/replies.json branches",
     );
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="332"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="332"]',
+      )
       .doesNotExist("child/floor replies are hidden by default");
     assert
       .dom(childListSelector(330))
@@ -434,7 +598,7 @@ acceptance("Video Shorts comments sheet", function (needs) {
       .dom(loadMoreRepliesSelector(330))
       .doesNotExist("unopened branches do not expose the pagination selector");
     assert
-      .dom(".d-modal__title")
+      .dom(".video-shorts-comments-panel__count")
       .hasText(
         "4 replies",
         "the comments title remains server-count based while child branches are unloaded",
@@ -567,20 +731,24 @@ acceptance("Video Shorts comments sheet", function (needs) {
       "loading a direct child page does not request grandchildren",
     );
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="342"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="342"]',
+      )
       .includesText("First child");
     assert
       .dom(childListSelector(340))
       .exists("opening the branch renders a data-video-shorts-child-list list");
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="345"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="345"]',
+      )
       .doesNotExist("loading a direct child page does not fetch grandchildren");
     assert
       .dom(viewRepliesSelector(342))
       .doesNotExist("second-level rows do not expose a third-level branch");
     assert
       .dom(
-        ".video-shorts-comments-surface__child-comment .video-shorts-comments-surface__child-list",
+        '[data-video-shorts-native-comment][data-depth="1"] [data-video-shorts-native-comment]',
       )
       .doesNotExist("the video UI keeps replies to two visual levels");
   });
@@ -652,14 +820,14 @@ acceptance("Video Shorts comments sheet", function (needs) {
     );
     assert.strictEqual(
       document.querySelectorAll(
-        '.video-shorts-comments-surface__child-comment[data-post-id="351"]',
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="351"]',
       ).length,
       doubleClickedBranch ? 1 : 0,
       "double-clicking one branch does not duplicate rendered rows",
     );
   });
 
-  test("lazy replies: paginated branches expose a localized load-more control", async function (assert) {
+  test("lazy replies: paginated deep branches expose a localized load-more control", async function (assert) {
     let parentBranchCalls = 0;
     const firstPage = Array.from({ length: 20 }, (_, index) =>
       directReply(
@@ -668,11 +836,36 @@ acceptance("Video Shorts comments sheet", function (needs) {
         `<p>Page child ${index + 1}</p>`,
         {
           post_number: 3 + index,
-          reply_to_post_number: 2,
+          reply_to_post_number: index === 0 ? 2 : 2 + index,
+          reply_count: 1,
           post_url: `/t/branch-pagination/135/${3 + index}`,
         },
       ),
     );
+    const branchPages = [
+      {
+        after: undefined,
+        response: {
+          posts: firstPage,
+          has_more: true,
+          next_after: firstPage.at(-1).post_number,
+        },
+      },
+      {
+        after: "22",
+        response: {
+          posts: [
+            directReply(420, "last-page-child", "<p>Last page child</p>", {
+              post_number: 23,
+              reply_to_post_number: 22,
+              post_url: "/t/branch-pagination/135/23",
+            }),
+          ],
+          has_more: false,
+          next_after: 23,
+        },
+      },
+    ];
 
     setupPretender((server, helper) => {
       server.get("/videos.json", () =>
@@ -695,26 +888,19 @@ acceptance("Video Shorts comments sheet", function (needs) {
         helper.response([
           directReply(379, "paged-parent", "<p>Paged parent</p>", {
             post_number: 2,
-            reply_count: 21,
+            reply_count: 1,
             post_url: "/t/branch-pagination/135/2",
           }),
         ]),
       );
 
-      server.get("/posts/379/replies.json", () => {
+      server.get("/video-shorts/comments/replies.json", (request) => {
+        const branchPage = branchPages[parentBranchCalls];
         parentBranchCalls += 1;
+        assert.strictEqual(request.queryParams.post_id, "379");
+        assert.strictEqual(request.queryParams.after, branchPage.after);
 
-        if (parentBranchCalls === 1) {
-          return helper.response(firstPage);
-        }
-
-        return helper.response([
-          directReply(420, "last-page-child", "<p>Last page child</p>", {
-            post_number: 23,
-            reply_to_post_number: 2,
-            post_url: "/t/branch-pagination/135/23",
-          }),
-        ]);
+        return helper.response(branchPage.response);
       });
     });
 
@@ -757,7 +943,9 @@ acceptance("Video Shorts comments sheet", function (needs) {
       "clicking the pagination control requests the next direct child page",
     );
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="420"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="420"]',
+      )
       .includesText("Last page child");
     assert
       .dom(loadMoreRepliesSelector(379))
@@ -826,7 +1014,9 @@ acceptance("Video Shorts comments sheet", function (needs) {
       "opening the exact page-size branch requests one direct child page",
     );
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="449"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="449"]',
+      )
       .includesText("Exact page child 20");
     assert
       .dom(loadMoreRepliesSelector(429))
@@ -917,7 +1107,9 @@ acceptance("Video Shorts comments sheet", function (needs) {
     await settled();
 
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="392"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="392"]',
+      )
       .includesText("Loaded after spinner");
   });
 
@@ -979,18 +1171,22 @@ acceptance("Video Shorts comments sheet", function (needs) {
     await click(viewRepliesSelector(380));
 
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="381"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="381"]',
+      )
       .includesText("Depth child");
     assert
       .dom(viewRepliesSelector(381))
       .doesNotExist("loaded second-level rows do not expose another branch");
     assertRowActions(assert, 381);
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="382"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="382"]',
+      )
       .doesNotExist("deeper replies are not rendered as a third visual level");
     assert
       .dom(
-        ".video-shorts-comments-surface__child-comment .video-shorts-comments-surface__child-list",
+        '[data-video-shorts-native-comment][data-depth="1"] [data-video-shorts-native-comment]',
       )
       .doesNotExist("the child reply list is never nested under a child row");
   });
@@ -1109,7 +1305,9 @@ acceptance("Video Shorts comments sheet", function (needs) {
         "the branch spinner clears after the pending branch resolves",
       );
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="541"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="541"]',
+      )
       .includesText("Branch child after pagination");
   });
 
@@ -1186,7 +1384,9 @@ acceptance("Video Shorts comments sheet", function (needs) {
       .dom('[data-post-id="360"] [data-video-shorts-retry-replies]')
       .hasAttribute("aria-label", "Retry loading replies");
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="361"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="361"]',
+      )
       .doesNotExist("a failed branch load does not insert child rows");
   });
 
@@ -1249,7 +1449,7 @@ acceptance("Video Shorts comments sheet", function (needs) {
       "opening comments does not load hidden children just to compute counts",
     );
     assert
-      .dom(".d-modal__title")
+      .dom(".video-shorts-comments-panel__count")
       .hasText("7 replies", "the sheet title keeps the server/source count");
     assert
       .dom(
@@ -1260,7 +1460,9 @@ acceptance("Video Shorts comments sheet", function (needs) {
         "sync-count does not overwrite the rail with the loaded DOM row count",
       );
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="371"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="371"]',
+      )
       .doesNotExist("unloaded child rows do not drive displayed counts");
     assert
       .dom(viewRepliesSelector(370))
@@ -1270,7 +1472,7 @@ acceptance("Video Shorts comments sheet", function (needs) {
       );
   });
 
-  test("opens custom comments sheet with child replies and no composer", async function (assert) {
+  test("opens native comments panel with collapsed child replies", async function (assert) {
     setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
@@ -1306,25 +1508,26 @@ acceptance("Video Shorts comments sheet", function (needs) {
     await click("[data-action='open-comments']");
 
     assert.strictEqual(currentURL(), beforeURL);
-    assert.dom(".video-shorts-comments-sheet").exists();
-    assert.dom(".video-shorts-comments-sheet").hasAttribute("role", "dialog");
-    assert.dom(".video-shorts-comments-surface__comment").exists({ count: 1 });
+    assert.dom(".video-shorts-comments-panel").exists();
+    assert.dom(".video-shorts-comments-panel").hasAttribute("aria-label");
+    assertNativePostContract(assert, 201, 0);
     assert
-      .dom(".video-shorts-comments-surface__cooked")
-      .includesText("First direct reply");
+      .dom('[data-video-shorts-native-comment][data-depth="0"]')
+      .exists({ count: 1 });
+    assert.dom(".cooked").includesText("First direct reply");
     assert
-      .dom(".video-shorts-comments-surface__child-comment")
+      .dom('[data-video-shorts-native-comment][data-depth="1"]')
       .doesNotExist("nested replies stay collapsed before branch load");
     assert.dom(viewRepliesSelector(201)).exists();
 
     await click(viewRepliesSelector(201));
 
     assert
-      .dom(".video-shorts-comments-surface__child-comment")
+      .dom('[data-video-shorts-native-comment][data-depth="1"]')
       .includesText("Nested direct reply");
     assert.dom("[data-video-shorts-reply-target]").doesNotExist();
-    assert.dom(".topic-post article.boxed").doesNotExist();
-    assert.dom(".post-action-menu").doesNotExist();
+    assert.dom(".topic-post article.boxed").exists();
+    assert.dom(".video-shorts-comments-surface .post-menu-area").exists();
     assert.dom("#reply-control.open").doesNotExist();
     assert.dom(".d-editor").doesNotExist();
   });
@@ -1391,19 +1594,25 @@ acceptance("Video Shorts comments sheet", function (needs) {
 
     await click("[data-action='open-comments']");
 
-    assert.dom(".d-modal__title").hasText("4 replies");
-    assert.dom(".video-shorts-comments-surface__comment").exists({ count: 2 });
+    assert.dom(".video-shorts-comments-panel__count").hasText("4 replies");
     assert
-      .dom(".video-shorts-comments-surface__child-comment")
+      .dom('[data-video-shorts-native-comment][data-depth="0"]')
+      .exists({ count: 2 });
+    assert
+      .dom('[data-video-shorts-native-comment][data-depth="1"]')
       .doesNotExist("nested replies are collapsed before a branch click");
 
     await click(viewRepliesSelector(216));
 
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="218"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="218"]',
+      )
       .includesText("Nested reply");
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="219"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="219"]',
+      )
       .doesNotExist("grandchildren are not loaded with the parent branch");
     assert
       .dom(viewRepliesSelector(218))
@@ -1523,15 +1732,15 @@ acceptance("Video Shorts comments sheet", function (needs) {
       0,
       "opening OP video comments does not fetch missing post batches",
     );
-    assert.dom(".d-modal__title").hasText("4 replies");
+    assert.dom(".video-shorts-comments-panel__count").hasText("4 replies");
     assert
-      .dom(".video-shorts-comments-surface__comment")
+      .dom('[data-video-shorts-native-comment][data-depth="0"]')
       .exists(
         { count: 1 },
         "initial OP comments are bounded to direct replies",
       );
     assert
-      .dom(".video-shorts-comments-surface__child-comment")
+      .dom('[data-video-shorts-native-comment][data-depth="1"]')
       .doesNotExist("nested topic replies stay collapsed on initial open");
     assert.strictEqual(
       topicBranchCalls,
@@ -1550,7 +1759,7 @@ acceptance("Video Shorts comments sheet", function (needs) {
       );
     assert.dom(viewRepliesSelector(231)).hasText("View more");
     assert
-      .dom(".video-shorts-comments-surface__cooked")
+      .dom(".cooked")
       .doesNotIncludeText(
         "Second topic comment",
         "topic JSON fallback comments are not prefetched",
@@ -1584,10 +1793,14 @@ acceptance("Video Shorts comments sheet", function (needs) {
       "expanding an OP branch keeps deeper descendants collapsed",
     );
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="233"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="233"]',
+      )
       .includesText("Nested direct reply");
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="234"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="234"]',
+      )
       .doesNotExist("deeper OP descendants wait for their own branch click");
     assert
       .dom(viewRepliesSelector(233))
@@ -1633,7 +1846,7 @@ acceptance("Video Shorts comments sheet", function (needs) {
 
     await click("[data-action='open-comments']");
 
-    assert.dom(".d-modal__title").hasText("5 replies");
+    assert.dom(".video-shorts-comments-panel__count").hasText("5 replies");
     assert
       .dom(
         '[data-post-id="122"] [data-action="open-comments"] .video-shorts-action-rail__count',
@@ -1687,12 +1900,78 @@ acceptance("Video Shorts comments sheet", function (needs) {
 
     assert
       .dom(
-        ".video-shorts-comments-surface__child-comment .video-shorts-comments-surface__avatar-link--small",
+        '[data-video-shorts-native-comment][data-depth="1"] .topic-avatar .avatar',
       )
       .exists("nested reply uses the fixed small avatar container");
   });
 
-  test("renders empty state without opening composer", async function (assert) {
+  test("loads every descendant into one native second-level branch", async function (assert) {
+    let branchRequests = 0;
+
+    setupPretender((server, helper) => {
+      server.get("/videos.json", () =>
+        helper.response({
+          items: [feedItem(139, "Flattened descendant branch clip")],
+          next_cursor: null,
+          scan_limit_reached: false,
+        }),
+      );
+
+      server.get("/posts/139/replies.json", () =>
+        helper.response([
+          directReply(400, "branch-parent", "<p>Branch parent</p>", {
+            post_number: 2,
+            reply_count: 1,
+            post_url: "/t/video-139/139/2",
+          }),
+        ]),
+      );
+
+      server.get("/video-shorts/comments/replies.json", (request) => {
+        branchRequests += 1;
+
+        assert.strictEqual(request.queryParams.post_id, "400");
+        assert.strictEqual(request.queryParams.after, undefined);
+
+        return helper.response({
+          posts: [
+            directReply(401, "branch-child", "<p>Branch child</p>", {
+              post_number: 3,
+              reply_to_post_number: 2,
+              reply_count: 1,
+              post_url: "/t/video-139/139/3",
+            }),
+            directReply(402, "branch-grandchild", "<p>Branch grandchild</p>", {
+              post_number: 4,
+              reply_to_post_number: 3,
+              post_url: "/t/video-139/139/4",
+            }),
+          ],
+          has_more: false,
+          next_after: 4,
+        });
+      });
+    });
+
+    await visit("/videos");
+    await click("[data-action='open-comments']");
+
+    assert.dom('[data-post-id="402"]').doesNotExist();
+
+    await click(viewRepliesSelector(400));
+
+    assert.strictEqual(branchRequests, 1);
+    assert
+      .dom('[data-video-shorts-native-comment][data-depth="1"]')
+      .exists({ count: 2 });
+    assert.dom('[data-post-id="401"]').includesText("Branch child");
+    assert.dom('[data-post-id="402"]').includesText("Branch grandchild");
+    assert
+      .dom('[data-video-shorts-native-comment][data-depth="2"]')
+      .doesNotExist("deeper descendants remain visually flattened");
+  });
+
+  test("renders empty state with the lightweight editor closed until requested", async function (assert) {
     setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
@@ -1708,12 +1987,42 @@ acceptance("Video Shorts comments sheet", function (needs) {
     await visit("/videos");
     await click("[data-action='open-comments']");
 
-    assert.dom(".video-shorts-comments-sheet").includesText("No comments yet");
-    assert.dom(".d-editor").doesNotExist();
-    assert.dom("[data-action='reply']").exists();
+    assert.dom(".video-shorts-comments-panel").includesText("No comments yet");
+    assert.dom("#reply-control.open .d-editor").doesNotExist();
+    assert.dom('[data-action="native-top-level-reply"]').exists();
   });
 
-  test("top-level reply publishes inline in the custom sheet", async function (assert) {
+  test("hides the top-level reply entry for an authenticated user without reply permission", async function (assert) {
+    setupPretender((server, helper) => {
+      server.get("/videos.json", () =>
+        helper.response({
+          items: [
+            feedItem(127, "Read-only clip", {
+              liked: false,
+              can_like: true,
+              bookmarked: false,
+              bookmark_id: null,
+              can_bookmark: true,
+              can_flag: true,
+              can_reply: false,
+              share_url: "/t/video-127/127/1",
+            }),
+          ],
+          next_cursor: null,
+          scan_limit_reached: false,
+        }),
+      );
+
+      server.get("/posts/127/replies.json", () => helper.response([]));
+    });
+
+    await visit("/videos");
+    await click("[data-action='open-comments']");
+
+    assert.dom('[data-action="native-top-level-reply"]').doesNotExist();
+  });
+
+  test("top-level reply publishes through the lightweight editor and stays on /videos", async function (assert) {
     setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
@@ -1736,15 +2045,23 @@ acceptance("Video Shorts comments sheet", function (needs) {
         const params = postParams(request);
 
         assert.strictEqual(params.get("topic_id"), "103");
-        assert.strictEqual(params.get("raw"), "Sheet inline reply");
-        assert.strictEqual(params.get("reply_to_post_number"), "1");
+        assert.strictEqual(params.get("raw"), "Native sheet inline reply");
+        assert.strictEqual(params.get("reply_to_post_number"), null);
 
         return helper.response(
-          directReply(223, "admin_user", "<p>Sheet inline reply</p>", {
-            post_number: 2,
-            raw: "Sheet inline reply",
-            post_url: "/t/replyable/103/2",
-          }),
+          nativeCreateResponse(
+            directReply(
+              91223,
+              "admin_user",
+              "<p>Native sheet inline reply</p>",
+              {
+                post_number: 2,
+                raw: "Native sheet inline reply",
+                topic_id: 103,
+                post_url: "/t/replyable/103/2",
+              },
+            ),
+          ),
         );
       });
     });
@@ -1753,25 +2070,16 @@ acceptance("Video Shorts comments sheet", function (needs) {
     const beforeURL = currentURL();
 
     await click("[data-action='open-comments']");
-    await fillIn("[data-video-shorts-reply-input]", "Sheet inline reply");
-    await click("[data-action='publish-reply']");
+    await openLightweightReplyEditor();
+    await publishLightweightReply("Native sheet inline reply");
 
     assert.strictEqual(currentURL(), beforeURL);
-    assert
-      .dom('.video-shorts-comments-surface__comment[data-post-id="223"]')
-      .includesText("Sheet inline reply");
-    assert.dom(".d-modal__title").hasText("1 reply");
-    assert
-      .dom(
-        '[data-post-id="103"] [data-action="open-comments"] .video-shorts-action-rail__count',
-      )
-      .hasText("1", "counts update after create from the source count");
-    assert.dom("[data-video-shorts-reply-input]").hasValue("");
     assert.dom("#reply-control.open").doesNotExist();
-    assert.dom("#reply-control .d-editor").doesNotExist();
+    assert.dom(replyEditorSelector()).doesNotExist();
+    assert.dom(".video-shorts-comments-panel").exists();
   });
 
-  test("places the top composer before comments inside the scrollable comments list", async function (assert) {
+  test("keeps the native reply entry and editor above comments outside the list", async function (assert) {
     setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
@@ -1796,9 +2104,8 @@ acceptance("Video Shorts comments sheet", function (needs) {
     const list = document.querySelector(
       "[data-video-shorts-youtube-thread-list]",
     );
-    const composer = document.querySelector("[data-video-shorts-reply-input]");
-    const composerShell = composer?.closest(
-      "[data-video-shorts-youtube-composer]",
+    const replyEntry = document.querySelector(
+      '[data-action="native-top-level-reply"]',
     );
     const firstComment = list?.querySelector(
       ".video-shorts-comments-surface__comment",
@@ -1810,50 +2117,85 @@ acceptance("Video Shorts comments sheet", function (needs) {
       "comments render inside a scrollable list",
     );
     assert.notStrictEqual(
-      composer,
+      replyEntry,
       null,
-      "the top comment composer is rendered",
-    );
-    assert.notStrictEqual(
-      composerShell,
-      null,
-      "the top comment composer keeps the composer wrapper",
+      "the native top-level reply entry is rendered",
     );
     assert.true(
-      Boolean(list && composer && list.contains(composer)),
-      "the top composer is inside the scrollable comments content",
+      replyEntry?.classList.contains(
+        "video-shorts-comments-surface__composer-entry",
+      ),
+      "the top-level entry uses the lightweight input appearance",
+    );
+    assert.strictEqual(
+      replyEntry?.getAttribute("data-video-shorts-top-level-composer-entry"),
+      "",
+      "the input-like entry exposes a stable inline editor hook",
+    );
+    assert
+      .dom(replyEntry)
+      .hasText(
+        "Add a comment...",
+        "the top-level entry renders the exact localized plain-text prompt",
+      );
+    assert.false(
+      /\{\{|\}\}|video_shorts|<|>/.test(replyEntry?.textContent || ""),
+      "the top-level prompt does not expose a translation key or template markup",
+    );
+    assert.false(
+      Boolean(list && replyEntry && list.contains(replyEntry)),
+      "the native reply entry stays in the toolbar outside the thread list",
     );
     assert.true(
       Boolean(
         list &&
-        composerShell &&
+        replyEntry &&
         firstComment &&
-        [...list.children].indexOf(composerShell) <
-          [...list.children].indexOf(firstComment),
+        replyEntry.closest(".video-shorts-comments-surface__native-toolbar")
+          ?.nextElementSibling === list,
       ),
-      "the top composer appears before the first comment",
+      "the native reply entry appears before the first comment",
     );
-    const composerPosition = composerShell
-      ? getComputedStyle(composerShell).position
-      : null;
-    assert.notStrictEqual(
-      composerPosition,
-      "sticky",
-      "the top composer is not sticky at the bottom",
+    assert.dom("#reply-control.open").doesNotExist();
+
+    await openLightweightReplyEditor();
+
+    const replyInput = document.querySelector(
+      `${replyEditorSelector()} [data-video-shorts-reply-input]`,
     );
-    assert.notStrictEqual(
-      composerPosition,
-      "fixed",
-      "the top composer is not fixed at the bottom",
+    assert.strictEqual(
+      document.activeElement,
+      replyInput,
+      "the top-level reply input receives focus when the editor opens",
+    );
+
+    const editor = document.querySelector(replyEditorSelector());
+    const toolbar = document.querySelector(
+      ".video-shorts-comments-surface__native-toolbar",
+    );
+    assert.notStrictEqual(editor, null, "the top-level entry opens the editor");
+    assert
+      .dom(`${replyEditorSelector()} [data-video-shorts-reply-input]`)
+      .hasAttribute(
+        "placeholder",
+        "Reply",
+        "the opened textarea renders the exact localized reply placeholder",
+      );
+    assert.true(
+      Boolean(editor && toolbar?.contains(editor)),
+      "the editor remains in the toolbar above the thread list",
+    );
+    assert.strictEqual(
+      toolbar?.nextElementSibling,
+      list,
+      "the editor toolbar remains immediately before the thread list",
     );
     assert
-      .dom("[data-video-shorts-reply-actions]")
-      .doesNotExist("the default top composer has no persistent actions");
-    assert.dom("[data-action='publish-reply']").doesNotExist();
-    assert.dom("[data-action='cancel-reply']").doesNotExist();
+      .dom(".video-shorts-comments-surface #reply-control")
+      .doesNotExist("core Composer is not nested in the comments scroll owner");
   });
 
-  test("locks the mobile comments sheet geometry at open time", async function (assert) {
+  test("preserves desktop comments panel geometry while the reply editor is open", async function (assert) {
     setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
@@ -1873,97 +2215,67 @@ acceptance("Video Shorts comments sheet", function (needs) {
     });
 
     await visit("/videos");
-    assert.strictEqual(
-      document.body.style.getPropertyValue(
-        "--video-shorts-mobile-route-height",
-      ),
-      `${window.innerHeight}px`,
-      "video route records the opening viewport height in px",
-    );
-
     await click("[data-action='open-comments']");
+    const panel = document.querySelector(".video-shorts-comments-panel");
+    const panelRect = await waitForStableRect(panel);
 
-    await waitUntil(() => {
-      const sheet = document.querySelector(".video-shorts-comments-sheet");
-      const container = document.querySelector(
-        ".video-shorts-comments-sheet .d-modal__container",
-      );
-      const rect = container?.getBoundingClientRect();
+    assert.true(panelRect.height > 0, "desktop panel has measurable height");
+    assert.true(
+      panelRect.bottom <= window.innerHeight + 2,
+      "desktop panel remains within the viewport",
+    );
 
-      return (
-        rect?.height > 0 &&
-        rect.top >= 0 &&
-        rect.bottom <= window.innerHeight + 2 &&
-        sheet?.style.getPropertyValue(
-          "--video-shorts-comments-sheet-stable-top",
-        ) &&
-        sheet?.style.getPropertyValue(
-          "--video-shorts-comments-sheet-stable-height",
-        )
-      );
-    });
+    await openLightweightReplyEditor();
 
-    const sheet = document.querySelector(".video-shorts-comments-sheet");
+    const stablePanelRect = await waitForStableRect(panel);
+    const bodyStyle = getComputedStyle(document.body);
+    const panelWidth = Number.parseFloat(
+      bodyStyle.getPropertyValue("--video-shorts-comments-panel-width"),
+    );
+    const panelHeight = Number.parseFloat(
+      bodyStyle.getPropertyValue("--video-shorts-comments-panel-height"),
+    );
+    const panelLeft = Number.parseFloat(
+      bodyStyle.getPropertyValue("--video-shorts-comments-panel-left"),
+    );
+    const panelTop = Number.parseFloat(
+      bodyStyle.getPropertyValue("--video-shorts-comments-panel-top"),
+    );
 
     assert
-      .dom(".video-shorts-comments-sheet .d-modal__container")
-      .exists("comments sheet modal container renders");
-    {
-      const rect = document
-        .querySelector(".video-shorts-comments-sheet .d-modal__container")
-        .getBoundingClientRect();
-
-      assert.true(
-        rect.bottom <= window.innerHeight + 2,
-        "sheet records its stable rectangle only after entering the viewport",
-      );
-    }
-    assert
-      .dom("[data-video-shorts-reply-input]")
-      .exists("top composer remains available");
+      .dom(replyEditorSelector())
+      .isVisible("lightweight editor is visible");
     assert.true(
-      sheet.style
-        .getPropertyValue("--video-shorts-comments-sheet-stable-top")
-        .endsWith("px"),
-      "sheet records its opening top edge in px",
+      document.body.classList.contains("video-shorts-comments-panel-open"),
+      "the route exposes the desktop panel state",
     );
-    assert.true(
-      sheet.style
-        .getPropertyValue("--video-shorts-comments-sheet-stable-height")
-        .endsWith("px"),
-      "sheet records its opening height in px",
+    assert.true(panelWidth > 0, "the route exposes a panel width");
+    assert.true(panelHeight > 0, "the route exposes a panel height");
+    assert.true(Number.isFinite(panelLeft), "the route exposes a panel left edge");
+    assert.true(Number.isFinite(panelTop), "the route exposes a panel top edge");
+    assert.strictEqual(
+      stablePanelRect.left,
+      panelRect.left,
+      "opening the lightweight editor does not move the comments panel horizontally",
     );
     assert.strictEqual(
-      sheet.style.getPropertyValue(
-        "--video-shorts-comments-sheet-stable-bottom",
-      ),
-      "auto",
-      "sheet releases the bottom edge after locking its opening rectangle",
+      stablePanelRect.top,
+      panelRect.top,
+      "opening the lightweight editor does not move the comments panel vertically",
     );
-
-    document.body.style.setProperty(
-      "--video-shorts-mobile-route-height",
-      "777px",
-    );
-    await focus("[data-video-shorts-reply-input]");
-    window.dispatchEvent(new Event("resize"));
-
     assert.strictEqual(
-      document.body.style.getPropertyValue(
-        "--video-shorts-mobile-route-height",
-      ),
-      "777px",
-      "focused comment inputs do not allow keyboard resize to overwrite route height",
+      stablePanelRect.width,
+      panelRect.width,
+      "opening the lightweight editor does not resize the comments panel width",
     );
-
-    await blur("[data-video-shorts-reply-input]");
-    document.body.style.setProperty(
-      "--video-shorts-mobile-route-height",
-      `${window.innerHeight}px`,
+    assert.strictEqual(
+      stablePanelRect.height,
+      panelRect.height,
+      "opening the lightweight editor does not resize the comments panel",
     );
   });
 
-  test("shows top composer cancel and publish controls only while the input is focused", async function (assert) {
+  test("dedicated editor owns reply controls for top-level and post replies", async function (assert) {
     setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
@@ -1985,57 +2297,36 @@ acceptance("Video Shorts comments sheet", function (needs) {
     await visit("/videos");
     await click("[data-action='open-comments']");
 
-    assert.dom("[data-video-shorts-reply-actions]").doesNotExist();
-    assert.dom("[data-action='publish-reply']").doesNotExist();
-    assert.dom("[data-action='cancel-reply']").doesNotExist();
+    assert.dom("#reply-control.open").doesNotExist();
 
-    await focus("[data-video-shorts-reply-input]");
+    await openLightweightReplyEditor();
 
-    assert.dom("[data-video-shorts-reply-actions]").isVisible();
-    assert.dom("[data-action='cancel-reply']").isVisible();
-    assert.dom("[data-action='publish-reply']").isVisible();
-
-    await blur("[data-video-shorts-reply-input]");
-
-    assert.dom("[data-video-shorts-reply-actions]").doesNotExist();
-    assert.dom("[data-action='publish-reply']").doesNotExist();
-    assert.dom("[data-action='cancel-reply']").doesNotExist();
-
-    await click('[data-post-id="229"] .video-shorts-comments-surface__cooked');
-
-    const replyActionSelector =
-      "[data-video-shorts-comment-action-sheet] [data-action='reply-to-comment']";
-
+    const topLevelEditor = replyEditorSelector();
+    assert.dom(`${topLevelEditor} [data-video-shorts-reply-input]`).isVisible();
+    assert.dom(`${topLevelEditor} [data-video-shorts-reply-cancel]`).exists();
     assert
-      .dom(replyActionSelector)
-      .exists("the comment action sheet exposes Reply");
-
-    await click(replyActionSelector);
-
-    const dialogSelector = "[data-video-shorts-comment-reply-dialog]";
-
-    assert.dom(dialogSelector).exists();
-    assert
-      .dom(`${dialogSelector} [data-video-shorts-comment-reply-input]`)
-      .isVisible();
-    assert
-      .dom(`${dialogSelector} [data-video-shorts-comment-reply-actions]`)
-      .isVisible("reply dialog actions are visible while the dialog is open");
-    assert
-      .dom(`${dialogSelector} [data-action='publish-comment-reply']`)
+      .dom(`${topLevelEditor} [data-video-shorts-reply-submit]`)
       .isVisible();
 
-    await blur(`${dialogSelector} [data-video-shorts-comment-reply-input]`);
+    await click(`${topLevelEditor} [data-video-shorts-reply-cancel]`);
+    assert.dom(topLevelEditor).doesNotExist();
 
+    await openLightweightReplyEditor(229);
+
+    const nestedEditor = replyEditorSelector(229);
     assert
-      .dom(`${dialogSelector} [data-video-shorts-comment-reply-actions]`)
-      .isVisible("reply dialog actions stay visible after textarea blur");
-    assert
-      .dom(`${dialogSelector} [data-action='publish-comment-reply']`)
-      .isVisible();
+      .dom(nestedEditor)
+      .hasClass(
+        "video-shorts-comments-surface__edit-editor",
+        "nested replies reuse the lightweight edit layout",
+      );
+    assert.dom(`${nestedEditor} [data-video-shorts-reply-input]`).isVisible();
+    assert.dom(`${nestedEditor} [data-video-shorts-reply-cancel]`).exists();
+    assert.dom(`${nestedEditor} [data-video-shorts-reply-submit]`).isVisible();
+    assert.dom("#reply-control.open").doesNotExist();
   });
 
-  test("comment reply publishes inline for a top-level comment", async function (assert) {
+  test("comment reply publishes through the lightweight editor for the selected Post", async function (assert) {
     setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
@@ -2057,17 +2348,25 @@ acceptance("Video Shorts comments sheet", function (needs) {
         const params = postParams(request);
 
         assert.strictEqual(params.get("topic_id"), "104");
-        assert.strictEqual(params.get("raw"), "Inline parent child");
+        assert.strictEqual(params.get("raw"), "Native inline parent child");
         assert.strictEqual(params.get("reply_to_post_number"), "2");
         assert.false(params.get("raw").startsWith("@reply-author"));
 
         return helper.response(
-          directReply(226, "admin_user", "<p>Inline parent child</p>", {
-            post_number: 3,
-            raw: "Inline parent child",
-            reply_to_post_number: 2,
-            post_url: "/t/nested-replyable/104/3",
-          }),
+          nativeCreateResponse(
+            directReply(
+              91226,
+              "admin_user",
+              "<p>Native inline parent child</p>",
+              {
+                post_number: 3,
+                raw: "Native inline parent child",
+                topic_id: 104,
+                reply_to_post_number: 2,
+                post_url: "/t/nested-replyable/104/3",
+              },
+            ),
+          ),
         );
       });
     });
@@ -2076,50 +2375,19 @@ acceptance("Video Shorts comments sheet", function (needs) {
     const beforeURL = currentURL();
 
     await click("[data-action='open-comments']");
-    await click('[data-post-id="204"] [data-action="reply-to-comment"]');
-    assert
-      .dom("[data-video-shorts-comment-reply-status]")
-      .includesText("Replying to @reply-author");
-    assert
-      .dom('[data-post-id="204"] [data-video-shorts-reply-target]')
-      .includesText("@reply-author");
-    assert
-      .dom("[data-video-shorts-comment-reply-dialog]")
-      .exists("comment replies open the centered reply dialog");
-    assert
-      .dom(
-        ".video-shorts-comments-surface__reply [data-video-shorts-comment-reply-input]",
-      )
-      .doesNotExist("comment replies do not use the sticky bottom composer");
+    await openLightweightReplyEditor(204);
 
-    await fillIn(
-      "[data-video-shorts-comment-reply-input]",
-      "Inline parent child",
-    );
-    await click("[data-action='publish-comment-reply']");
+    assert.dom(replyEditorSelector(204)).isVisible();
+    assert.dom("[data-video-shorts-comment-reply-dialog]").doesNotExist();
+    await publishLightweightReply("Native inline parent child", 204);
 
     assert.strictEqual(currentURL(), beforeURL);
-    assert
-      .dom(
-        '.video-shorts-comments-surface__comment[data-post-id="204"] .video-shorts-comments-surface__child-comment[data-post-id="226"]',
-      )
-      .includesText("Inline parent child");
-    assert
-      .dom('[data-post-id="226"] [data-video-shorts-reply-target]')
-      .hasText(
-        "@reply-author",
-        "first-level comment replies render a video-only plain-text @username prefix",
-      );
-    assert
-      .dom('[data-post-id="226"] [data-video-shorts-reply-target] a')
-      .doesNotExist("the video-only @username prefix is not a link");
     assert.dom("#reply-control.open").doesNotExist();
-    assert.dom("#reply-control .d-editor").doesNotExist();
-    assert.dom("[data-video-shorts-comment-reply-status]").doesNotExist();
-    assert.dom("[data-video-shorts-comment-reply-input]").doesNotExist();
+    assert.dom(replyEditorSelector(204)).doesNotExist();
+    assert.dom(".video-shorts-comments-panel").exists();
   });
 
-  test("floor comment reply publishes inline for the selected child", async function (assert) {
+  test("floor comment reply targets the selected native child Post", async function (assert) {
     setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
@@ -2154,17 +2422,25 @@ acceptance("Video Shorts comments sheet", function (needs) {
         const params = postParams(request);
 
         assert.strictEqual(params.get("topic_id"), "118");
-        assert.strictEqual(params.get("raw"), "Inline floor child");
+        assert.strictEqual(params.get("raw"), "Native inline floor child");
         assert.strictEqual(params.get("reply_to_post_number"), "3");
         assert.false(params.get("raw").startsWith("@child-author"));
 
         return helper.response(
-          directReply(227, "admin_user", "<p>Inline floor child</p>", {
-            post_number: 4,
-            raw: "Inline floor child",
-            reply_to_post_number: 3,
-            post_url: "/t/native-floor-reply/118/4",
-          }),
+          nativeCreateResponse(
+            directReply(
+              91227,
+              "admin_user",
+              "<p>Native inline floor child</p>",
+              {
+                post_number: 4,
+                raw: "Native inline floor child",
+                topic_id: 118,
+                reply_to_post_number: 3,
+                post_url: "/t/native-floor-reply/118/4",
+              },
+            ),
+          ),
         );
       });
     });
@@ -2175,70 +2451,21 @@ acceptance("Video Shorts comments sheet", function (needs) {
     await click("[data-action='open-comments']");
     await click(viewRepliesSelector(224));
 
-    assert
-      .dom('[data-post-id="225"] [data-video-shorts-reply-target]')
-      .hasText(
-        "@reply-author",
-        "first-level loaded replies render a video-only plain-text @username prefix",
-      );
+    await openLightweightReplyEditor(225);
 
-    await click('[data-post-id="225"] [data-action="reply-to-comment"]');
-    assert
-      .dom("[data-video-shorts-comment-reply-status]")
-      .includesText("Replying to @child-author");
-    assert
-      .dom('[data-post-id="225"] [data-video-shorts-reply-target]')
-      .includesText("@child-author");
-    assert
-      .dom("[data-video-shorts-comment-reply-dialog]")
-      .exists("floor replies open the centered reply dialog");
-    assert
-      .dom(
-        ".video-shorts-comments-surface__reply [data-video-shorts-comment-reply-input]",
-      )
-      .doesNotExist("floor replies do not use the sticky bottom composer");
-    assert
-      .dom('[data-post-id="225"] [data-video-shorts-comment-reply-input]')
-      .doesNotExist("floor replies do not render a cramped inline input");
-
-    await fillIn(
-      "[data-video-shorts-comment-reply-input]",
-      "Inline floor child",
-    );
-    await click("[data-action='publish-comment-reply']");
+    assert.dom(replyEditorSelector(225)).isVisible();
+    assert.dom("[data-video-shorts-comment-reply-dialog]").doesNotExist();
+    await publishLightweightReply("Native inline floor child", 225);
 
     assert.strictEqual(currentURL(), beforeURL);
-    assert
-      .dom(
-        '.video-shorts-comments-surface__child-comment[data-post-id="225"] .video-shorts-comments-surface__child-comment[data-post-id="227"]',
-      )
-      .includesText("Inline floor child");
-    assert
-      .dom(
-        '.video-shorts-comments-surface__comment[data-post-id="224"] > .video-shorts-comments-surface__comment-card > .video-shorts-comments-surface__comment-main > .video-shorts-comments-surface__child-list > .video-shorts-comments-surface__child-comment[data-post-id="227"]',
-      )
-      .doesNotExist();
-    assert
-      .dom('[data-post-id="227"] [data-video-shorts-reply-target]')
-      .hasText(
-        "@child-author",
-        "floor replies render a video-only plain-text @username prefix",
-      );
-    assert
-      .dom('[data-post-id="227"] [data-video-shorts-reply-target] a')
-      .doesNotExist("the video-only @username prefix is not a link");
-    assert
-      .dom(
-        '[data-post-id="227"] [data-video-shorts-reply-target] [data-user-card]',
-      )
-      .doesNotExist("the video-only @username prefix does not open user cards");
     assert.dom("#reply-control.open").doesNotExist();
-    assert.dom("#reply-control .d-editor").doesNotExist();
-    assert.dom("[data-video-shorts-comment-reply-status]").doesNotExist();
-    assert.dom("[data-video-shorts-comment-reply-input]").doesNotExist();
+    assert.dom(replyEditorSelector(225)).doesNotExist();
+    assert.dom(".video-shorts-comments-panel").exists();
   });
 
-  test("renders permission-aware custom tools menu", async function (assert) {
+  test("renders permission-aware native PostMenu actions", async function (assert) {
+    const flagActionId = this.owner.lookup("service:site").flagTypes[0].id;
+
     setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
@@ -2250,11 +2477,12 @@ acceptance("Video Shorts comments sheet", function (needs) {
 
       server.get("/posts/105/replies.json", () =>
         helper.response([
-          directReply(205, "admin_user", "<p>Comment with tools</p>", {
+          directReply(205, "managed-author", "<p>Comment with tools</p>", {
             can_edit: true,
             can_delete: true,
             can_flag: true,
             post_url: "/t/managed-comment/105/2",
+            actions_summary: [{ id: flagActionId, can_act: true }],
           }),
         ]),
       );
@@ -2262,18 +2490,17 @@ acceptance("Video Shorts comments sheet", function (needs) {
 
     await visit("/videos");
     await click("[data-action='open-comments']");
-    await click('[data-post-id="205"] [data-action="comment-tools-toggle"]');
+    await revealNativePostActions(205);
 
-    assert.dom('[data-post-id="205"] .post-action-menu').doesNotExist();
-    assert.dom('[data-video-shorts-comment-tools-menu="205"]').exists();
-    assert.dom('[data-action="edit-comment"]').exists();
-    assert.dom('[data-action="copy-comment-link"]').exists();
-    assert.dom('[data-action="open-comment-topic"]').exists();
-    assert.dom('[data-action="flag-comment"]').exists();
-    assert.dom('[data-action="delete-comment"]').exists();
+    assertNativePostContract(assert, 205, 0);
+    assert.dom(`${nativePostSelector(205)} .post-menu-area`).exists();
+    assert.dom(nativePostActionSelector(205, "edit")).exists();
+    assert.dom(nativePostActionSelector(205, "copy-link")).exists();
+    assert.dom(nativePostActionSelector(205, "flag")).exists();
+    assert.dom(nativePostActionSelector(205, "delete")).exists();
   });
 
-  test("clicking a comment body opens a direct bottom action sheet", async function (assert) {
+  test("comment body stays native and actions remain in PostMenu", async function (assert) {
     setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
@@ -2299,37 +2526,25 @@ acceptance("Video Shorts comments sheet", function (needs) {
 
     await visit("/videos");
     await click("[data-action='open-comments']");
-    await click('[data-post-id="244"] .video-shorts-comments-surface__cooked');
+    await click(`${nativePostSelector(244)} .cooked`);
 
-    const sheetSelector = "[data-video-shorts-comment-action-sheet]";
-
+    assertNativePostContract(assert, 244, 0);
     assert
-      .dom(sheetSelector)
-      .exists("clicking the comment body opens the comment action sheet");
-    assert
-      .dom(sheetSelector)
-      .hasAttribute(
-        "data-post-id",
-        "244",
-        "the bottom action sheet targets the clicked comment",
+      .dom("[data-video-shorts-comment-action-sheet]")
+      .doesNotExist(
+        "native cooked content does not open a plugin action sheet",
       );
-    assert
-      .dom(`${sheetSelector} [data-action="reply-to-comment"]`)
-      .exists("the action sheet lists Reply directly");
-    assert.dom(`${sheetSelector} [data-action="edit-comment"]`).exists();
-    assert.dom(`${sheetSelector} [data-action="copy-comment-link"]`).exists();
-    assert.dom(`${sheetSelector} [data-action="open-comment-topic"]`).exists();
-    assert.dom(`${sheetSelector} [data-action="flag-comment"]`).exists();
-    assert.dom(`${sheetSelector} [data-action="delete-comment"]`).exists();
-    assert
-      .dom(`${sheetSelector} [data-action="comment-tools-toggle"]`)
-      .doesNotExist("the action sheet does not nest another three-dot menu");
-    assert
-      .dom('[data-video-shorts-comment-tools-menu="244"]')
-      .doesNotExist("comment body click does not just open the inline tools");
+    assert.dom(nativePostActionSelector(244, "reply")).exists();
+
+    await revealNativePostActions(244);
+
+    assert.dom(nativePostActionSelector(244, "edit")).exists();
+    assert.dom(nativePostActionSelector(244, "copy-link")).exists();
+    assert.dom(nativePostActionSelector(244, "flag")).exists();
+    assert.dom(nativePostActionSelector(244, "delete")).exists();
   });
 
-  test("keyboard events on cooked comment links do not open the action sheet", async function (assert) {
+  test("preserves native cooked-link keyboard behavior", async function (assert) {
     setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
@@ -2357,9 +2572,7 @@ acceptance("Video Shorts comments sheet", function (needs) {
     await visit("/videos");
     await click("[data-action='open-comments']");
 
-    const link = document.querySelector(
-      '[data-post-id="248"] .video-shorts-comments-surface__cooked a',
-    );
+    const link = document.querySelector(`${nativePostSelector(248)} .cooked a`);
 
     assert.notStrictEqual(
       link,
@@ -2389,13 +2602,11 @@ acceptance("Video Shorts comments sheet", function (needs) {
 
       assert
         .dom("[data-video-shorts-comment-action-sheet]")
-        .doesNotExist(
-          `${key} on the cooked link does not open the action sheet`,
-        );
+        .doesNotExist(`${key} on the cooked link stays in native Post content`);
     }
   });
 
-  test("reply from the action sheet opens a centered reply dialog", async function (assert) {
+  test("native PostMenu reply opens the inline lightweight editor", async function (assert) {
     setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
@@ -2417,57 +2628,17 @@ acceptance("Video Shorts comments sheet", function (needs) {
 
     await visit("/videos");
     await click("[data-action='open-comments']");
-    await click('[data-post-id="245"] .video-shorts-comments-surface__cooked');
+    await openLightweightReplyEditor(245);
 
-    const sheetSelector = "[data-video-shorts-comment-action-sheet]";
-    const replyActionSelector = `${sheetSelector} [data-action="reply-to-comment"]`;
-
-    assert
-      .dom(sheetSelector)
-      .exists("the row action sheet is open before choosing Reply");
-    assert
-      .dom(replyActionSelector)
-      .exists("Reply is a direct action in the action sheet");
-
-    await click(replyActionSelector);
-
-    const surface = document.querySelector(".video-shorts-comments-surface");
-    const dialog = document.querySelector(
-      "[data-video-shorts-comment-reply-dialog]",
-    );
-    const dialogSelector = "[data-video-shorts-comment-reply-dialog]";
-
-    assert
-      .dom(sheetSelector)
-      .doesNotExist("choosing Reply closes the action sheet");
-    assert
-      .dom(dialogSelector)
-      .exists("choosing Reply opens the centered comment reply dialog");
-    assert
-      .dom(dialogSelector)
-      .hasAttribute(
-        "aria-label",
-        "Reply to dialog-author",
-        "the reply dialog has an accessible name",
-      );
-    assert.true(
-      Boolean(surface && dialog && surface.contains(dialog)),
-      "the reply dialog is rendered inside the comments surface",
-    );
-    assert
-      .dom(`${dialogSelector} [data-video-shorts-comment-reply-input]`)
-      .isVisible();
-    assert
-      .dom(`${dialogSelector} [data-action="cancel-comment-reply"]`)
-      .isVisible();
-    assert
-      .dom(`${dialogSelector} [data-action="publish-comment-reply"]`)
-      .isVisible();
-    assert
-      .dom(
-        ".video-shorts-comments-surface__reply [data-video-shorts-comment-reply-input]",
-      )
-      .doesNotExist("comment replies no longer use the sticky bottom composer");
+    assertNativePostContract(assert, 245, 0);
+    assert.dom("[data-video-shorts-comment-action-sheet]").doesNotExist();
+    const editor = replyEditorSelector(245);
+    assert.dom(editor).isVisible();
+    assert.dom("[data-video-shorts-comment-reply-dialog]").doesNotExist();
+    assert.dom(`${editor} [data-video-shorts-reply-input]`).isVisible();
+    assert.dom(`${editor} [data-video-shorts-reply-cancel]`).exists();
+    assert.dom(`${editor} [data-video-shorts-reply-submit]`).isVisible();
+    assert.dom("#reply-control.open").doesNotExist();
   });
 
   test("opens native flag modal for a comment report", async function (assert) {
@@ -2511,8 +2682,9 @@ acceptance("Video Shorts comments sheet", function (needs) {
     try {
       await visit("/videos");
       await click("[data-action='open-comments']");
-      await click('[data-post-id="213"] [data-action="comment-tools-toggle"]');
-      await click('[data-post-id="213"] [data-action="flag-comment"]');
+      await revealNativePostActions(213);
+      assertNativePostContract(assert, 213, 0);
+      await click(nativePostActionSelector(213, "flag"));
     } finally {
       modal.show = originalShow;
     }
@@ -2541,10 +2713,10 @@ acceptance("Video Shorts comments sheet", function (needs) {
     shownModals[0].setHidden();
 
     assert.true(valueFor(shownModals[0].flagModel, "hidden"));
-    assert.dom('[data-video-shorts-comment-tools-menu="213"]').doesNotExist();
+    assert.dom("[data-video-shorts-comment-tools-menu]").doesNotExist();
   });
 
-  test("hides comment report action when native flagging is unavailable", async function (assert) {
+  test("hides native PostMenu flag action when flagging is unavailable", async function (assert) {
     setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
@@ -2568,13 +2740,14 @@ acceptance("Video Shorts comments sheet", function (needs) {
 
     await visit("/videos");
     await click("[data-action='open-comments']");
-    await click('[data-post-id="214"] [data-action="comment-tools-toggle"]');
+    await revealNativePostActions(214);
 
-    assert.dom('[data-video-shorts-comment-tools-menu="214"]').exists();
-    assert.dom('[data-action="flag-comment"]').doesNotExist();
+    assertNativePostContract(assert, 214, 0);
+    assert.dom(`${nativePostSelector(214)} .post-menu-area`).exists();
+    assert.dom(nativePostActionSelector(214, "flag")).doesNotExist();
   });
 
-  test("closes custom comment tools menu on outside click and Escape", async function (assert) {
+  test("native PostMenu does not create plugin menus on outside click or Escape", async function (assert) {
     setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
@@ -2598,30 +2771,25 @@ acceptance("Video Shorts comments sheet", function (needs) {
 
     await visit("/videos");
     await click("[data-action='open-comments']");
-    await click('[data-post-id="207"] [data-action="comment-tools-toggle"]');
+    await revealNativePostActions(207);
 
-    assert.dom('[data-video-shorts-comment-tools-menu="207"]').exists();
+    assertNativePostContract(assert, 207, 0);
+    assert.dom(`${nativePostSelector(207)} .post-menu-area`).exists();
+    assert.dom("[data-video-shorts-comment-tools-menu]").doesNotExist();
 
     await click(".video-shorts-comments-surface");
 
-    assert
-      .dom('[data-video-shorts-comment-tools-menu="207"]')
-      .doesNotExist("outside surface click closes the custom tools menu");
-
-    await click('[data-post-id="207"] [data-action="comment-tools-toggle"]');
     await triggerKeyEvent(
       ".video-shorts-comments-surface",
       "keydown",
       "Escape",
     );
 
-    assert
-      .dom('[data-video-shorts-comment-tools-menu="207"]')
-      .doesNotExist("Escape closes the custom tools menu");
-    assert.dom(".post-action-menu").doesNotExist();
+    assert.dom("[data-video-shorts-comment-tools-menu]").doesNotExist();
+    assert.dom(`${nativePostSelector(207)} .post-menu-area`).exists();
   });
 
-  test("updates mobile sheet and rail counts after deleting a comment", async function (assert) {
+  test("updates comments panel and rail counts after deleting a comment", async function (assert) {
     setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
@@ -2656,16 +2824,16 @@ acceptance("Video Shorts comments sheet", function (needs) {
 
     await click("[data-action='open-comments']");
 
-    assert.dom(".d-modal__title").hasText("2 replies");
+    assert.dom(".video-shorts-comments-panel__count").hasText("2 replies");
 
-    await click('[data-post-id="210"] [data-action="comment-tools-toggle"]');
-    await click('[data-post-id="210"] [data-action="delete-comment"]');
+    await revealNativePostActions(210);
+    await click(nativePostActionSelector(210, "delete"));
     await click(".dialog-footer .btn-primary");
 
     assert
       .dom('.video-shorts-comments-surface__comment[data-post-id="210"]')
       .doesNotExist("deleted comment is removed from the open sheet");
-    assert.dom(".d-modal__title").hasText("1 reply");
+    assert.dom(".video-shorts-comments-panel__count").hasText("1 reply");
     assert
       .dom(
         '[data-post-id="110"] [data-action="open-comments"] .video-shorts-action-rail__count',
@@ -2673,7 +2841,7 @@ acceptance("Video Shorts comments sheet", function (needs) {
       .hasText("1", "rail count updates immediately after delete");
   });
 
-  test("refreshes comment surface after delete without closing comments", async function (assert) {
+  test("reconciles a loaded native delete without refetching or closing comments", async function (assert) {
     let refreshRepliesRequests = 0;
 
     setupPretender((server, helper) => {
@@ -2718,18 +2886,22 @@ acceptance("Video Shorts comments sheet", function (needs) {
     await click("[data-action='open-comments']");
 
     assert.dom("[data-action='sort-recent']").doesNotExist();
-    assert.dom(".d-modal__body").exists("comments sheet is open before delete");
+    assert
+      .dom(".video-shorts-comments-panel")
+      .exists("comments panel is open before delete");
 
-    await click('[data-post-id="218"] [data-action="comment-tools-toggle"]');
-    await click('[data-post-id="218"] [data-action="delete-comment"]');
+    await revealNativePostActions(218);
+    await click(nativePostActionSelector(218, "delete"));
     await click(".dialog-footer .btn-primary");
 
     assert.strictEqual(
       refreshRepliesRequests,
-      2,
-      "source replies are refetched after the destructive mutation",
+      1,
+      "a loaded native Post delete is reconciled locally without a full source refetch",
     );
-    assert.dom(".d-modal__body").exists("comments sheet stays open");
+    assert
+      .dom(".video-shorts-comments-panel")
+      .exists("comments panel stays open");
     assert.strictEqual(currentURL(), "/videos");
     assert.dom("[data-action='sort-recent']").doesNotExist();
     assert
@@ -2737,17 +2909,20 @@ acceptance("Video Shorts comments sheet", function (needs) {
       .doesNotExist("stale deleted comment is gone");
     assert
       .dom('.video-shorts-comments-surface__comment[data-post-id="220"]')
-      .includesText("Fresh after delete");
+      .doesNotExist("unrelated server rows are not fetched by a local delete");
     assert.strictEqual(
       document.querySelectorAll(
         '.video-shorts-comments-surface__comment[data-post-id="219"]',
       ).length,
       1,
-      "refresh does not duplicate existing comments",
+      "local delete does not duplicate existing comments",
     );
   });
 
-  test("reconciles edited comment from core post response", async function (assert) {
+  test("edits a comment with the lightweight editor and reconciles the server response", async function (assert) {
+    let updateRequests = 0;
+    let updatedRaw;
+
     setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
@@ -2776,46 +2951,70 @@ acceptance("Video Shorts comments sheet", function (needs) {
         ),
       );
 
-      server.put("/posts/221.json", () =>
-        helper.response({
-          post: directReply(
-            221,
-            "admin_user",
-            "<p>Server cooked after edit</p>",
-            {
-              can_edit: true,
-              raw: "Server raw after edit",
-              updated_at: "2026-06-08T13:00:00.000Z",
-              post_url: "/t/edit-reconcile/117/2",
-            },
-          ),
-        }),
-      );
+      server.put("/posts/221.json", (request) => {
+        updateRequests += 1;
+        updatedRaw = postParams(request).get("post[raw]");
+
+        return helper.response(
+          directReply(221, "admin_user", "<p>Server cooked after edit</p>", {
+            can_edit: true,
+            raw: "Server raw after edit",
+            topic_id: 117,
+            updated_at: "2026-06-08T13:00:00.000Z",
+            post_url: "/t/edit-reconcile/117/2",
+          }),
+        );
+      });
     });
 
     await visit("/videos");
     await click("[data-action='open-comments']");
-    await click('[data-post-id="221"] [data-action="comment-tools-toggle"]');
-    await click('[data-post-id="221"] [data-action="edit-comment"]');
+    await revealNativePostActions(221);
+    await click(nativePostActionSelector(221, "edit"));
+
+    const editor =
+      '[data-video-shorts-edit-editor][data-post-id="221"]';
 
     assert
-      .dom("[data-video-shorts-edit-input]")
+      .dom(`${editor} [data-video-shorts-edit-input]`)
       .hasValue("Fresh raw before edit");
+    assert.dom("#reply-control.open").doesNotExist();
 
-    await fillIn("[data-video-shorts-edit-input]", "Typed draft not echoed");
-    await click('[data-action="save-edit"]');
+    await fillIn(
+      `${editor} [data-video-shorts-edit-input]`,
+      "Cancelled lightweight draft",
+    );
+    await click(`${editor} [data-video-shorts-edit-cancel]`);
 
-    assert.dom("[data-video-shorts-edit-input]").doesNotExist();
+    assert.dom(editor).doesNotExist();
+    assert.strictEqual(updateRequests, 0, "cancel does not update the post");
+    assert
+      .dom('.video-shorts-comments-surface__comment[data-post-id="221"]')
+      .includesText("Original editable comment");
+
+    await revealNativePostActions(221);
+    await click(nativePostActionSelector(221, "edit"));
+    await fillIn(
+      `${editor} [data-video-shorts-edit-input]`,
+      "Typed lightweight draft",
+    );
+    await click(`${editor} [data-video-shorts-edit-save]`);
+
+    assert.dom(editor).doesNotExist();
+    assert.strictEqual(updateRequests, 1);
+    assert.strictEqual(updatedRaw, "Typed lightweight draft");
     assert
       .dom('.video-shorts-comments-surface__comment[data-post-id="221"]')
       .includesText("Server cooked after edit");
     assert
       .dom('.video-shorts-comments-surface__comment[data-post-id="221"]')
-      .doesNotIncludeText("Typed draft not echoed");
+      .doesNotIncludeText("Typed lightweight draft");
     assert.strictEqual(currentURL(), "/videos");
   });
 
-  test("reconciles edited child reply from core post response", async function (assert) {
+  test("edits a child reply with the lightweight editor", async function (assert) {
+    let updatedRaw;
+
     setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
@@ -2859,47 +3058,59 @@ acceptance("Video Shorts comments sheet", function (needs) {
         ),
       );
 
-      server.put("/posts/230.json", () =>
-        helper.response({
-          post: directReply(
-            230,
-            "admin_user",
-            "<p>Server nested after edit</p>",
-            {
-              can_edit: true,
-              post_number: 3,
-              reply_to_post_number: 2,
-              raw: "Server nested after edit",
-              updated_at: "2026-06-08T13:30:00.000Z",
-              post_url: "/t/edit-nested-child/119/3",
-            },
-          ),
-        }),
-      );
+      server.put("/posts/230.json", (request) => {
+        updatedRaw = postParams(request).get("post[raw]");
+
+        return helper.response(
+          directReply(230, "admin_user", "<p>Server nested after edit</p>", {
+            can_edit: true,
+            post_number: 3,
+            reply_to_post_number: 2,
+            raw: "Server nested after edit",
+            topic_id: 119,
+            updated_at: "2026-06-08T13:30:00.000Z",
+            post_url: "/t/edit-nested-child/119/3",
+          }),
+        );
+      });
     });
 
     await visit("/videos");
     await click("[data-action='open-comments']");
     await click(viewRepliesSelector(229));
-    await click('[data-post-id="230"] [data-action="comment-tools-toggle"]');
-    await click('[data-post-id="230"] [data-action="edit-comment"]');
+    await revealNativePostActions(230);
+    await click(nativePostActionSelector(230, "edit"));
 
-    assert.dom("[data-video-shorts-edit-input]").hasValue("Fresh nested raw");
+    const editor =
+      '[data-video-shorts-edit-editor][data-post-id="230"]';
 
-    await fillIn("[data-video-shorts-edit-input]", "Typed nested draft");
-    await click('[data-action="save-edit"]');
-
-    assert.dom("[data-video-shorts-edit-input]").doesNotExist();
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="230"]')
+      .dom(`${editor} [data-video-shorts-edit-input]`)
+      .hasValue("Fresh nested raw");
+    assert.dom("#reply-control.open").doesNotExist();
+
+    await fillIn(
+      `${editor} [data-video-shorts-edit-input]`,
+      "Typed lightweight nested draft",
+    );
+    await click(`${editor} [data-video-shorts-edit-save]`);
+
+    assert.dom(editor).doesNotExist();
+    assert.strictEqual(updatedRaw, "Typed lightweight nested draft");
+    assert
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="230"]',
+      )
       .includesText("Server nested after edit");
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="230"]')
-      .doesNotIncludeText("Typed nested draft");
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="230"]',
+      )
+      .doesNotIncludeText("Typed lightweight nested draft");
     assert.strictEqual(currentURL(), "/videos");
   });
 
-  test("lazy-loaded child replies expose native comment tools", async function (assert) {
+  test("lazy-loaded child replies expose native PostMenu actions", async function (assert) {
     setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
@@ -2937,26 +3148,24 @@ acceptance("Video Shorts comments sheet", function (needs) {
     await visit("/videos");
     await click("[data-action='open-comments']");
     await click(viewRepliesSelector(244));
-    await click('[data-post-id="245"] [data-action="comment-tools-toggle"]');
+    await revealNativePostActions(245);
 
+    assertNativePostContract(assert, 245, 1);
     assert
-      .dom('[data-post-id="245"] [data-action="edit-comment"]')
+      .dom(nativePostActionSelector(245, "edit"))
       .exists("lazy child keeps the native edit action");
     assert
-      .dom('[data-post-id="245"] [data-action="copy-comment-link"]')
+      .dom(nativePostActionSelector(245, "copy-link"))
       .exists("lazy child keeps the native copy-link action");
     assert
-      .dom('[data-post-id="245"] [data-action="open-comment-topic"]')
-      .exists("lazy child keeps the native open-topic action");
-    assert
-      .dom('[data-post-id="245"] [data-action="flag-comment"]')
+      .dom(nativePostActionSelector(245, "flag"))
       .exists("lazy child keeps the native report action");
     assert
-      .dom('[data-post-id="245"] [data-action="delete-comment"]')
+      .dom(nativePostActionSelector(245, "delete"))
       .exists("lazy child keeps the native delete action");
   });
 
-  test("updates mobile sheet and rail counts after deleting a child reply", async function (assert) {
+  test("updates comments panel and rail counts after deleting a child reply", async function (assert) {
     setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
@@ -3013,22 +3222,27 @@ acceptance("Video Shorts comments sheet", function (needs) {
     await click("[data-action='open-comments']");
     await click(viewRepliesSelector(212));
 
-    assert.dom(".d-modal__title").hasText("3 replies");
+    assertNativePostContract(assert, 213, 1);
+    assert.dom(".video-shorts-comments-panel__count").hasText("3 replies");
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="213"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="213"]',
+      )
       .includesText("Child reply to delete");
 
-    await click('[data-post-id="213"] [data-action="comment-tools-toggle"]');
-    await click('[data-post-id="213"] [data-action="delete-comment"]');
+    await revealNativePostActions(213);
+    await click(nativePostActionSelector(213, "delete"));
     await click(".dialog-footer .btn-primary");
 
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="213"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="213"]',
+      )
       .doesNotExist("deleted child reply is removed from the open sheet");
     assert
       .dom('.video-shorts-comments-surface__comment[data-post-id="212"]')
       .doesNotIncludeText("1 reply");
-    assert.dom(".d-modal__title").hasText("2 replies");
+    assert.dom(".video-shorts-comments-panel__count").hasText("2 replies");
     assert
       .dom(
         '[data-post-id="111"] [data-action="open-comments"] .video-shorts-action-rail__count',
@@ -3091,22 +3305,28 @@ acceptance("Video Shorts comments sheet", function (needs) {
     await click("[data-action='open-comments']");
     await click(viewRepliesSelector(231));
 
-    assert.dom(".d-modal__title").hasText("4 replies");
+    assert.dom(".video-shorts-comments-panel__count").hasText("4 replies");
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="233"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="233"]',
+      )
       .includesText("Deep child to delete");
 
-    await click('[data-post-id="233"] [data-action="comment-tools-toggle"]');
-    await click('[data-post-id="233"] [data-action="delete-comment"]');
+    await revealNativePostActions(233);
+    await click(nativePostActionSelector(233, "delete"));
     await click(".dialog-footer .btn-primary");
 
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="233"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="233"]',
+      )
       .doesNotExist("deleted deep child reply is removed from the open sheet");
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="232"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="232"]',
+      )
       .includesText("Child comment remains");
-    assert.dom(".d-modal__title").hasText("3 replies");
+    assert.dom(".video-shorts-comments-panel__count").hasText("3 replies");
     assert
       .dom(
         '[data-post-id="120"] [data-action="open-comments"] .video-shorts-action-rail__count',
@@ -3161,6 +3381,15 @@ acceptance("Video Shorts comments sheet", function (needs) {
           }),
         ]),
       );
+      server.get("/posts/236/replies.json", () =>
+        helper.response([
+          directReply(237, "grandchild-author", "<p>Grandchild remains</p>", {
+            post_number: 4,
+            reply_to_post_number: 3,
+            post_url: "/t/delete-child-descendant/121/4",
+          }),
+        ]),
+      );
 
       server.delete("/posts/236.json", () => helper.response({}));
     });
@@ -3169,22 +3398,28 @@ acceptance("Video Shorts comments sheet", function (needs) {
     await click("[data-action='open-comments']");
     await click(viewRepliesSelector(235));
 
-    assert.dom(".d-modal__title").hasText("3 replies");
+    assert.dom(".video-shorts-comments-panel__count").hasText("3 replies");
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="237"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="237"]',
+      )
       .includesText("Grandchild remains");
 
-    await click('[data-post-id="236"] [data-action="comment-tools-toggle"]');
-    await click('[data-post-id="236"] [data-action="delete-comment"]');
+    await revealNativePostActions(236);
+    await click(nativePostActionSelector(236, "delete"));
     await click(".dialog-footer .btn-primary");
 
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="236"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="236"]',
+      )
       .includesText("Deleted comment");
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="237"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="237"]',
+      )
       .includesText("Grandchild remains");
-    assert.dom(".d-modal__title").hasText("2 replies");
+    assert.dom(".video-shorts-comments-panel__count").hasText("2 replies");
     assert
       .dom(
         '[data-post-id="121"] [data-action="open-comments"] .video-shorts-action-rail__count',
@@ -3192,7 +3427,7 @@ acceptance("Video Shorts comments sheet", function (needs) {
       .hasText("2", "rail count decrements only the deleted child reply");
   });
 
-  test("updates mobile sheet and rail counts after deleting a parent with children", async function (assert) {
+  test("updates comments panel and rail counts after deleting a parent with children", async function (assert) {
     setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
@@ -3254,22 +3489,26 @@ acceptance("Video Shorts comments sheet", function (needs) {
     await click("[data-action='open-comments']");
     await click(viewRepliesSelector(215));
 
-    assert.dom(".d-modal__title").hasText("3 replies");
+    assert.dom(".video-shorts-comments-panel__count").hasText("3 replies");
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="216"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="216"]',
+      )
       .includesText("Mobile child reply remains");
 
-    await click('[data-post-id="215"] [data-action="comment-tools-toggle"]');
-    await click('[data-post-id="215"] [data-action="delete-comment"]');
+    await revealNativePostActions(215);
+    await click(nativePostActionSelector(215, "delete"));
     await click(".dialog-footer .btn-primary");
 
     assert
       .dom('.video-shorts-comments-surface__comment[data-post-id="215"]')
       .includesText("Deleted comment");
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="216"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="216"]',
+      )
       .includesText("Mobile child reply remains");
-    assert.dom(".d-modal__title").hasText("2 replies");
+    assert.dom(".video-shorts-comments-panel__count").hasText("2 replies");
     assert
       .dom(
         '[data-post-id="112"] [data-action="open-comments"] .video-shorts-action-rail__count',
@@ -3355,14 +3594,16 @@ acceptance("Video Shorts comments sheet", function (needs) {
     await click("[data-action='open-comments']");
 
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="251"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="251"]',
+      )
       .doesNotExist("target children start unloaded");
     assert
       .dom(viewRepliesSelector(253))
       .exists("unrelated branch is collapsed");
 
-    await click('[data-post-id="250"] [data-action="comment-tools-toggle"]');
-    await click('[data-post-id="250"] [data-action="delete-comment"]');
+    await revealNativePostActions(250);
+    await click(nativePostActionSelector(250, "delete"));
     await click(".dialog-footer .btn-primary");
 
     assert.strictEqual(
@@ -3379,23 +3620,870 @@ acceptance("Video Shorts comments sheet", function (needs) {
       .dom('.video-shorts-comments-surface__comment[data-post-id="250"]')
       .includesText("Deleted comment");
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="251"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="251"]',
+      )
       .includesText("First preserved child");
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="252"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="252"]',
+      )
       .includesText("Second preserved child");
     assert
-      .dom('.video-shorts-comments-surface__child-comment[data-post-id="254"]')
+      .dom(
+        '[data-video-shorts-native-comment][data-depth="1"][data-post-id="254"]',
+      )
       .doesNotExist("unrelated child remains unloaded");
     assert
       .dom(viewRepliesSelector(253))
       .exists("unrelated branch stays collapsed");
-    assert.dom(".d-modal__title").hasText("3 replies");
+    assert.dom(".video-shorts-comments-panel__count").hasText("3 replies");
     assert
       .dom(
         '[data-post-id="125"] [data-action="open-comments"] .video-shorts-action-rail__count',
       )
       .hasText("3", "rail count decrements only the deleted parent");
+  });
+});
+
+acceptance("Video Shorts mobile comments sheet viewport", function (needs) {
+  needs.settings({ video_shorts_enabled: true });
+  needs.user();
+  needs.mobileView();
+
+  test("keeps the sheet stable and scrolls an inline reply above the mobile keyboard", async function (assert) {
+    class FakeVisualViewport extends EventTarget {
+      height = window.innerHeight;
+      offsetTop = 0;
+      listenerCounts = new Map();
+
+      addEventListener(type, callback, options) {
+        super.addEventListener(type, callback, options);
+        this.listenerCounts.set(type, (this.listenerCounts.get(type) || 0) + 1);
+      }
+
+      removeEventListener(type, callback, options) {
+        super.removeEventListener(type, callback, options);
+        this.listenerCounts.set(
+          type,
+          Math.max((this.listenerCounts.get(type) || 0) - 1, 0),
+        );
+      }
+    }
+
+    const originalVisualViewport = Object.getOwnPropertyDescriptor(
+      window,
+      "visualViewport",
+    );
+    const originalMatchMedia = window.matchMedia;
+    const visualViewport = new FakeVisualViewport();
+    const mobileLayoutQuery = new EventTarget();
+
+    mobileLayoutQuery.matches = false;
+    mobileLayoutQuery.media = "(min-width: 1024px)";
+
+    window.matchMedia = (query) =>
+      query === mobileLayoutQuery.media
+        ? mobileLayoutQuery
+        : originalMatchMedia.call(window, query);
+
+    Object.defineProperty(window, "visualViewport", {
+      configurable: true,
+      value: visualViewport,
+    });
+
+    try {
+      setupPretender((server, helper) => {
+        server.get("/videos.json", () =>
+          helper.response({
+            items: [feedItem(131, "Keyboard-safe nested reply clip")],
+            next_cursor: null,
+            scan_limit_reached: false,
+          }),
+        );
+
+        server.get("/posts/131/replies.json", () =>
+          helper.response([
+            directReply(251, "keyboard-author", "<p>Reply above keyboard</p>", {
+              post_number: 2,
+              post_url: "/t/keyboard-safe-reply/131/2",
+            }),
+          ]),
+        );
+      });
+
+      await visit("/videos");
+      const baselineResizeListeners =
+        visualViewport.listenerCounts.get("resize") || 0;
+      const baselineScrollListeners =
+        visualViewport.listenerCounts.get("scroll") || 0;
+      await click("[data-action='open-comments']");
+
+      const sheet = document.querySelector(".video-shorts-comments-sheet");
+      await waitUntil(
+        () =>
+          sheet.style.getPropertyValue(
+            "--video-shorts-comments-sheet-stable-height",
+          ) !== "",
+      );
+
+      const stableTop = sheet.style.getPropertyValue(
+        "--video-shorts-comments-sheet-stable-top",
+      );
+      const stableHeight = sheet.style.getPropertyValue(
+        "--video-shorts-comments-sheet-stable-height",
+      );
+
+      const list = document.querySelector(
+        ".video-shorts-comments-surface__list",
+      );
+      const originalInlinePaddingBottom =
+        list.style.getPropertyValue("padding-bottom");
+
+      await openLightweightReplyEditor(251);
+      const editorSelector = replyEditorSelector(251);
+      const editor = document.querySelector(editorSelector);
+      const textarea = editor.querySelector(
+        "[data-video-shorts-reply-input]",
+      );
+      const initialScrollTop = list.scrollTop;
+      const initialPaddingBottom =
+        Number.parseFloat(getComputedStyle(list).paddingBottom) || 0;
+      let scrollTop = initialScrollTop;
+
+      Object.defineProperty(list, "scrollTop", {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value) => {
+          const paddingBottom =
+            Number.parseFloat(getComputedStyle(list).paddingBottom) || 0;
+          const maxScrollTop =
+            initialScrollTop +
+            Math.max(paddingBottom - initialPaddingBottom, 0);
+
+          scrollTop = Math.min(Math.max(value, 0), maxScrollTop);
+        },
+      });
+      list.getBoundingClientRect = () => ({
+        bottom: 800,
+        height: 600,
+        left: 0,
+        right: 390,
+        top: 200,
+        width: 390,
+        x: 0,
+        y: 200,
+      });
+      editor.getBoundingClientRect = () => {
+        const scrollDelta = scrollTop - initialScrollTop;
+
+        return {
+          bottom: 800 - scrollDelta,
+          height: 170,
+          left: 24,
+          right: 366,
+          top: 630 - scrollDelta,
+          width: 342,
+          x: 24,
+          y: 630 - scrollDelta,
+        };
+      };
+
+      textarea.focus();
+      visualViewport.height = 520;
+      visualViewport.dispatchEvent(new Event("resize"));
+      visualViewport.dispatchEvent(new Event("scroll"));
+      await new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      );
+
+      assert.dom(sheet).exists("the actual comments sheet remains mounted");
+      assert.dom(editorSelector).isVisible();
+      assert.dom("[data-video-shorts-comment-reply-dialog]").doesNotExist();
+      assert.true(
+        (visualViewport.listenerCounts.get("resize") || 0) > 0,
+        "the nested reply registers a visual viewport resize listener",
+      );
+      assert.true(
+        (visualViewport.listenerCounts.get("scroll") || 0) > 0,
+        "the nested reply registers a visual viewport scroll listener",
+      );
+
+      assert.strictEqual(
+        sheet.style.getPropertyValue("--video-shorts-comments-sheet-stable-top"),
+        stableTop,
+        "keyboard events do not rewrite the stable sheet top",
+      );
+      assert.strictEqual(
+        sheet.style.getPropertyValue(
+          "--video-shorts-comments-sheet-stable-height",
+        ),
+        stableHeight,
+        "keyboard events do not rewrite the stable sheet height",
+      );
+      assert.strictEqual(
+        editor.closest(".video-shorts-comments-surface__comment")?.dataset
+          .postId,
+        "251",
+        "the reply editor stays inside the selected comment row",
+      );
+      assert.strictEqual(
+        list.style.getPropertyValue(
+          "--video-shorts-comments-edit-keyboard-reserve",
+        ),
+        "292px",
+        "the inline reply receives the keyboard occlusion plus action margin",
+      );
+      assert.true(
+        scrollTop > initialScrollTop,
+        "keyboard resize scrolls the comments list toward the inline reply",
+      );
+      assert.strictEqual(
+        Number.parseFloat(getComputedStyle(list).paddingBottom),
+        initialPaddingBottom + 292,
+        "keyboard occlusion adds real scroll range below the inline reply",
+      );
+      assert.true(
+        editor.getBoundingClientRect().bottom <=
+          visualViewport.offsetTop + visualViewport.height - 12,
+        "the inline reply actions remain above the keyboard",
+      );
+      assert
+        .dom(`${editorSelector} [data-video-shorts-reply-submit]`)
+        .isVisible("publish remains reachable");
+
+      await click(`${editorSelector} [data-video-shorts-reply-cancel]`);
+      assert
+        .dom(editorSelector)
+        .doesNotExist("cancel removes the inline reply editor");
+      await waitUntil(
+        () =>
+          list.style.getPropertyValue(
+            "--video-shorts-comments-edit-keyboard-reserve",
+          ) === "",
+      );
+      assert.strictEqual(
+        list.style.getPropertyValue("padding-bottom"),
+        originalInlinePaddingBottom,
+        "cancel restores the comments list padding",
+      );
+      assert.false(
+        document.body.classList.contains(
+          "video-shorts-lightweight-composer-open",
+        ),
+        "cancel releases the body interaction lock",
+      );
+
+      await click(".video-shorts-comments-sheet .modal-close");
+      assert.dom(".video-shorts-comments-sheet").doesNotExist();
+      await waitUntil(
+        () =>
+          visualViewport.listenerCounts.get("resize") ===
+            baselineResizeListeners &&
+          visualViewport.listenerCounts.get("scroll") ===
+            baselineScrollListeners,
+      );
+      assert.strictEqual(
+        visualViewport.listenerCounts.get("resize"),
+        baselineResizeListeners,
+      );
+      assert.strictEqual(
+        visualViewport.listenerCounts.get("scroll"),
+        baselineScrollListeners,
+      );
+    } finally {
+      window.matchMedia = originalMatchMedia;
+
+      if (originalVisualViewport) {
+        Object.defineProperty(window, "visualViewport", originalVisualViewport);
+      } else {
+        delete window.visualViewport;
+      }
+    }
+  });
+
+  test("scrolls a focused lightweight edit above the mobile keyboard", async function (assert) {
+    class FakeVisualViewport extends EventTarget {
+      height = window.innerHeight;
+      offsetTop = 0;
+    }
+
+    const originalVisualViewport = Object.getOwnPropertyDescriptor(
+      window,
+      "visualViewport",
+    );
+    const originalMatchMedia = window.matchMedia;
+    const visualViewport = new FakeVisualViewport();
+    const mobileLayoutQuery = new EventTarget();
+
+    mobileLayoutQuery.matches = false;
+    mobileLayoutQuery.media = "(min-width: 1024px)";
+
+    window.matchMedia = (query) =>
+      query === mobileLayoutQuery.media
+        ? mobileLayoutQuery
+        : originalMatchMedia.call(window, query);
+
+    Object.defineProperty(window, "visualViewport", {
+      configurable: true,
+      value: visualViewport,
+    });
+
+    try {
+      setupPretender((server, helper) => {
+        server.get("/videos.json", () =>
+          helper.response({
+            items: [feedItem(132, "Keyboard-safe lightweight edit clip")],
+            next_cursor: null,
+            scan_limit_reached: false,
+          }),
+        );
+
+        server.get("/posts/132/replies.json", () =>
+          helper.response([
+            directReply(261, "admin_user", "<p>Edit above keyboard</p>", {
+              can_edit: true,
+              post_number: 2,
+              post_url: "/t/keyboard-safe-edit/132/2",
+              raw: "Edit above keyboard",
+            }),
+          ]),
+        );
+
+        server.get("/posts/261.json", () =>
+          helper.response(
+            directReply(261, "admin_user", "<p>Edit above keyboard</p>", {
+              can_edit: true,
+              post_number: 2,
+              post_url: "/t/keyboard-safe-edit/132/2",
+              raw: "Edit above keyboard",
+            }),
+          ),
+        );
+      });
+
+      await visit("/videos");
+      await click("[data-action='open-comments']");
+      const list = document.querySelector(
+        ".video-shorts-comments-surface__list",
+      );
+      const originalInlinePaddingBottom =
+        list.style.getPropertyValue("padding-bottom");
+
+      await revealNativePostActions(261);
+      await click(nativePostActionSelector(261, "edit"));
+
+      const sheet = document.querySelector(".video-shorts-comments-sheet");
+      const editor = document.querySelector(
+        '[data-video-shorts-edit-editor][data-post-id="261"]',
+      );
+      const textarea = editor.querySelector(
+        "[data-video-shorts-edit-input]",
+      );
+      const initialScrollTop = list.scrollTop;
+      const initialPaddingBottom =
+        Number.parseFloat(getComputedStyle(list).paddingBottom) || 0;
+      let scrollTop = initialScrollTop;
+
+      Object.defineProperty(list, "scrollTop", {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value) => {
+          const paddingBottom =
+            Number.parseFloat(getComputedStyle(list).paddingBottom) || 0;
+          const maxScrollTop =
+            initialScrollTop +
+            Math.max(paddingBottom - initialPaddingBottom, 0);
+
+          scrollTop = Math.min(Math.max(value, 0), maxScrollTop);
+        },
+      });
+
+      list.getBoundingClientRect = () => ({
+        bottom: 800,
+        height: 600,
+        left: 0,
+        right: 390,
+        top: 200,
+        width: 390,
+        x: 0,
+        y: 200,
+      });
+      editor.getBoundingClientRect = () => {
+        const scrollDelta = scrollTop - initialScrollTop;
+
+        return {
+          bottom: 800 - scrollDelta,
+          height: 170,
+          left: 24,
+          right: 366,
+          top: 630 - scrollDelta,
+          width: 342,
+          x: 24,
+          y: 630 - scrollDelta,
+        };
+      };
+
+      textarea.focus();
+      visualViewport.height = 520;
+      visualViewport.dispatchEvent(new Event("resize"));
+      await new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      );
+
+      assert.dom(sheet).exists();
+      assert.strictEqual(
+        document.activeElement,
+        textarea,
+        "the edit textarea remains the keyboard focus target",
+      );
+      assert.strictEqual(
+        list.style.getPropertyValue(
+          "--video-shorts-comments-edit-keyboard-reserve",
+        ),
+        "292px",
+        "the list receives the keyboard occlusion plus action margin",
+      );
+      assert.true(
+        scrollTop > initialScrollTop,
+        "keyboard resize scrolls the comments list toward the editor",
+      );
+      assert.strictEqual(
+        Number.parseFloat(getComputedStyle(list).paddingBottom),
+        initialPaddingBottom + 292,
+        "keyboard occlusion adds real scroll range below the editor",
+      );
+      assert.true(
+        editor.getBoundingClientRect().bottom <=
+          visualViewport.offsetTop + visualViewport.height - 12,
+        "the editor actions remain above the keyboard",
+      );
+      assert
+        .dom(
+          '[data-video-shorts-edit-editor][data-post-id="261"] [data-video-shorts-edit-save]',
+        )
+        .isVisible("save remains reachable");
+      assert.dom("#reply-control.open").doesNotExist();
+
+      await click(
+        '[data-video-shorts-edit-editor][data-post-id="261"] [data-video-shorts-edit-cancel]',
+      );
+      await waitUntil(
+        () =>
+          list.style.getPropertyValue(
+            "--video-shorts-comments-edit-keyboard-reserve",
+          ) === "",
+      );
+      assert.strictEqual(
+        list.style.getPropertyValue("padding-bottom"),
+        originalInlinePaddingBottom,
+        "cancel restores the comments list padding",
+      );
+      await click(".video-shorts-comments-sheet .modal-close");
+    } finally {
+      window.matchMedia = originalMatchMedia;
+
+      if (originalVisualViewport) {
+        Object.defineProperty(window, "visualViewport", originalVisualViewport);
+      } else {
+        delete window.visualViewport;
+      }
+    }
+  });
+
+  test("locks the sheet before a fast top-level composer focus can suppress the initial viewport capture", async function (assert) {
+    class FakeVisualViewport extends EventTarget {
+      height = window.innerHeight;
+      offsetTop = 0;
+    }
+
+    const originalVisualViewport = Object.getOwnPropertyDescriptor(
+      window,
+      "visualViewport",
+    );
+    const originalMatchMedia = window.matchMedia;
+    const visualViewport = new FakeVisualViewport();
+    const mobileLayoutQuery = new EventTarget();
+
+    mobileLayoutQuery.matches = false;
+    mobileLayoutQuery.media = "(min-width: 1024px)";
+
+    window.matchMedia = (query) =>
+      query === mobileLayoutQuery.media
+        ? mobileLayoutQuery
+        : originalMatchMedia.call(window, query);
+
+    Object.defineProperty(window, "visualViewport", {
+      configurable: true,
+      value: visualViewport,
+    });
+
+    try {
+      setupPretender((server, helper) => {
+        server.get("/videos.json", () =>
+          helper.response({
+            items: [feedItem(132, "Fast top-level focus clip")],
+            next_cursor: null,
+            scan_limit_reached: false,
+          }),
+        );
+
+        server.get("/posts/132/replies.json", () => helper.response([]));
+      });
+
+      await visit("/videos");
+      await click("[data-action='open-comments']");
+
+      const sheet = document.querySelector(".video-shorts-comments-sheet");
+      await waitUntil(
+        () =>
+          sheet.style.getPropertyValue(
+            "--video-shorts-comments-sheet-stable-height",
+          ) !== "",
+      );
+
+      const initialStableTop = sheet.style.getPropertyValue(
+        "--video-shorts-comments-sheet-stable-top",
+      );
+      const initialStableHeight = sheet.style.getPropertyValue(
+        "--video-shorts-comments-sheet-stable-height",
+      );
+
+      await click('[data-video-shorts-top-level-composer-entry]');
+      const textarea = document.querySelector(
+        `${replyEditorSelector()} [data-video-shorts-reply-input]`,
+      );
+      sheet.style.removeProperty("--video-shorts-comments-sheet-stable-top");
+      sheet.style.removeProperty("--video-shorts-comments-sheet-stable-height");
+      textarea.focus();
+
+      assert.strictEqual(
+        sheet.style.getPropertyValue("--video-shorts-comments-sheet-stable-top"),
+        "",
+        "the simulated initial capture is still pending when focus wins the race",
+      );
+      assert.strictEqual(
+        sheet.style.getPropertyValue(
+          "--video-shorts-comments-sheet-stable-height",
+        ),
+        "",
+        "the simulated initial height capture is still pending when focus wins the race",
+      );
+
+      visualViewport.height = Math.max(window.innerHeight / 2, 40);
+      visualViewport.dispatchEvent(new Event("resize"));
+      visualViewport.dispatchEvent(new Event("scroll"));
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      await settled();
+
+      const stableTop = sheet.style.getPropertyValue(
+        "--video-shorts-comments-sheet-stable-top",
+      );
+      const stableHeight = sheet.style.getPropertyValue(
+        "--video-shorts-comments-sheet-stable-height",
+      );
+
+      assert.notStrictEqual(
+        stableTop,
+        "",
+        "a focused textarea cannot suppress the first stable top capture",
+      );
+      assert.notStrictEqual(
+        stableHeight,
+        "",
+        "a focused textarea cannot suppress the first stable height capture",
+      );
+      assert.strictEqual(
+        stableTop,
+        initialStableTop,
+        "the focused retry restores the exact original sheet top",
+      );
+      assert.strictEqual(
+        stableHeight,
+        initialStableHeight,
+        "the focused retry restores the exact original sheet height",
+      );
+
+      visualViewport.offsetTop = 24;
+      visualViewport.height = Math.max(window.innerHeight / 3, 40);
+      visualViewport.dispatchEvent(new Event("resize"));
+      visualViewport.dispatchEvent(new Event("scroll"));
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      await settled();
+
+      assert.strictEqual(
+        sheet.style.getPropertyValue("--video-shorts-comments-sheet-stable-top"),
+        stableTop,
+        "later keyboard viewport events do not rewrite the captured top",
+      );
+      assert.strictEqual(
+        sheet.style.getPropertyValue(
+          "--video-shorts-comments-sheet-stable-height",
+        ),
+        stableHeight,
+        "later keyboard viewport events do not rewrite the captured height",
+      );
+
+      await click(
+        `${replyEditorSelector()} [data-video-shorts-reply-cancel]`,
+      );
+      await click('[data-video-shorts-top-level-composer-entry]');
+      document
+        .querySelector(`${replyEditorSelector()} [data-video-shorts-reply-input]`)
+        .focus();
+      visualViewport.dispatchEvent(new Event("resize"));
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+
+      assert.strictEqual(
+        sheet.style.getPropertyValue("--video-shorts-comments-sheet-stable-top"),
+        stableTop,
+        "cancel and refocus preserve the original top lock",
+      );
+      assert.strictEqual(
+        sheet.style.getPropertyValue(
+          "--video-shorts-comments-sheet-stable-height",
+        ),
+        stableHeight,
+        "cancel and refocus preserve the original height lock",
+      );
+    } finally {
+      window.matchMedia = originalMatchMedia;
+
+      if (originalVisualViewport) {
+        Object.defineProperty(window, "visualViewport", originalVisualViewport);
+      } else {
+        delete window.visualViewport;
+      }
+    }
+  });
+
+  test("bounds invalid sheet geometry retries and cancels the queued frame on teardown", async function (assert) {
+    class FakeVisualViewport extends EventTarget {
+      height = window.innerHeight;
+      offsetTop = 0;
+    }
+
+    const originalRequestAnimationFrame = window.requestAnimationFrame;
+    const originalCancelAnimationFrame = window.cancelAnimationFrame;
+    const originalVisualViewport = Object.getOwnPropertyDescriptor(
+      window,
+      "visualViewport",
+    );
+    const originalMatchMedia = window.matchMedia;
+    const queuedFrames = new Map();
+    const canceledFrames = [];
+    const visualViewport = new FakeVisualViewport();
+    const mobileLayoutQuery = new EventTarget();
+    let nextFrameId = 1;
+    let callbackRuns = 0;
+
+    mobileLayoutQuery.matches = false;
+    mobileLayoutQuery.media = "(min-width: 1024px)";
+
+    window.matchMedia = (query) =>
+      query === mobileLayoutQuery.media
+        ? mobileLayoutQuery
+        : originalMatchMedia.call(window, query);
+
+    Object.defineProperty(window, "visualViewport", {
+      configurable: true,
+      value: visualViewport,
+    });
+
+    try {
+      setupPretender((server, helper) => {
+        server.get("/videos.json", () =>
+          helper.response({
+            items: [feedItem(133, "Invalid sheet geometry clip")],
+            next_cursor: null,
+            scan_limit_reached: false,
+          }),
+        );
+
+        server.get("/posts/133/replies.json", () => helper.response([]));
+      });
+
+      await visit("/videos");
+      await click("[data-action='open-comments']");
+
+      await waitUntil(() =>
+        document.querySelector(".video-shorts-comments-sheet"),
+      );
+      const sheet = document.querySelector(".video-shorts-comments-sheet");
+      const container = sheet.querySelector(".d-modal__container");
+      await waitUntil(
+        () =>
+          sheet.style.getPropertyValue(
+            "--video-shorts-comments-sheet-stable-height",
+          ) !== "",
+      );
+
+      const originalGetBoundingClientRect =
+        container.getBoundingClientRect.bind(container);
+      const validRect = originalGetBoundingClientRect();
+
+      window.requestAnimationFrame = (callback) => {
+        const id = nextFrameId++;
+        queuedFrames.set(id, callback);
+        return id;
+      };
+      window.cancelAnimationFrame = (id) => {
+        canceledFrames.push(id);
+        queuedFrames.delete(id);
+      };
+      container.getBoundingClientRect = () => ({
+        bottom: 0,
+        height: 0,
+        left: 0,
+        right: 0,
+        top: 0,
+        width: 0,
+        x: 0,
+        y: 0,
+        toJSON() {
+          return {};
+        },
+      });
+      sheet.style.removeProperty("--video-shorts-comments-sheet-stable-top");
+      sheet.style.removeProperty("--video-shorts-comments-sheet-stable-height");
+      sheet.style.removeProperty("--video-shorts-comments-sheet-captured-top");
+      sheet.style.removeProperty(
+        "--video-shorts-comments-sheet-captured-height",
+      );
+
+      window.dispatchEvent(new Event("resize"));
+      assert.strictEqual(
+        queuedFrames.size,
+        1,
+        "invalid geometry schedules one bounded retry chain",
+      );
+
+      for (let index = 0; index < 13; index += 1) {
+        const [id, callback] = queuedFrames.entries().next().value || [];
+        if (!callback) {
+          break;
+        }
+
+        queuedFrames.delete(id);
+        callbackRuns += 1;
+        callback(performance.now());
+      }
+
+      assert.true(
+        callbackRuns <= 12,
+        "invalid geometry stops retrying within the finite frame budget",
+      );
+      assert.strictEqual(
+        queuedFrames.size,
+        0,
+        "invalid geometry leaves no perpetual animation frame queued",
+      );
+
+      container.getBoundingClientRect = originalGetBoundingClientRect;
+      visualViewport.dispatchEvent(new Event("resize"));
+      const resumedFrameId = queuedFrames.keys().next().value;
+      assert.notStrictEqual(
+        resumedFrameId,
+        undefined,
+        "a later visual viewport event can schedule a fresh geometry check",
+      );
+
+      const resumedCallback = queuedFrames.get(resumedFrameId);
+      queuedFrames.delete(resumedFrameId);
+      resumedCallback(performance.now());
+
+      const lockedTop = sheet.style.getPropertyValue(
+        "--video-shorts-comments-sheet-stable-top",
+      );
+      const lockedHeight = sheet.style.getPropertyValue(
+        "--video-shorts-comments-sheet-stable-height",
+      );
+
+      assert.strictEqual(
+        lockedTop,
+        `${validRect.top}px`,
+        "an external event locks the valid sheet top after retries were exhausted",
+      );
+      assert.strictEqual(
+        lockedHeight,
+        `${validRect.height}px`,
+        "an external event locks the valid sheet height after retries were exhausted",
+      );
+      assert.strictEqual(
+        queuedFrames.size,
+        0,
+        "a successful lock ends the restarted retry chain",
+      );
+
+      window.dispatchEvent(new Event("resize"));
+      sheet.dispatchEvent(new Event("focusin", { bubbles: true }));
+      visualViewport.dispatchEvent(new Event("scroll"));
+      const lockedFrameId = queuedFrames.keys().next().value;
+      const lockedCallback = queuedFrames.get(lockedFrameId);
+      queuedFrames.delete(lockedFrameId);
+      lockedCallback(performance.now());
+
+      assert.strictEqual(
+        sheet.style.getPropertyValue("--video-shorts-comments-sheet-stable-top"),
+        lockedTop,
+        "later external events do not rewrite a successful top lock",
+      );
+      assert.strictEqual(
+        sheet.style.getPropertyValue(
+          "--video-shorts-comments-sheet-stable-height",
+        ),
+        lockedHeight,
+        "later external events do not rewrite a successful height lock",
+      );
+
+      container.getBoundingClientRect = () => ({
+        bottom: 0,
+        height: 0,
+        left: 0,
+        right: 0,
+        top: 0,
+        width: 0,
+        x: 0,
+        y: 0,
+        toJSON() {
+          return {};
+        },
+      });
+      sheet.style.removeProperty("--video-shorts-comments-sheet-stable-top");
+      sheet.style.removeProperty("--video-shorts-comments-sheet-stable-height");
+      sheet.style.removeProperty("--video-shorts-comments-sheet-captured-top");
+      sheet.style.removeProperty(
+        "--video-shorts-comments-sheet-captured-height",
+      );
+      sheet.dispatchEvent(new Event("focusin", { bubbles: true }));
+      const queuedRetryId = queuedFrames.keys().next().value;
+
+      document.querySelector(".video-shorts-comments-sheet .modal-close").click();
+      await waitUntil(
+        () => !document.querySelector(".video-shorts-comments-sheet"),
+      );
+
+      assert.true(
+        canceledFrames.includes(queuedRetryId),
+        "teardown cancels the outstanding geometry retry frame",
+      );
+      assert.false(
+        queuedFrames.has(queuedRetryId),
+        "the canceled teardown frame cannot run after modal destruction",
+      );
+
+      container.getBoundingClientRect = originalGetBoundingClientRect;
+    } finally {
+      window.requestAnimationFrame = originalRequestAnimationFrame;
+      window.cancelAnimationFrame = originalCancelAnimationFrame;
+      window.matchMedia = originalMatchMedia;
+
+      if (originalVisualViewport) {
+        Object.defineProperty(window, "visualViewport", originalVisualViewport);
+      } else {
+        delete window.visualViewport;
+      }
+    }
   });
 });
 
@@ -3431,16 +4519,13 @@ acceptance("Video Shorts comments sheet anonymous report", function (needs) {
     await click("[data-action='open-comments']");
 
     assert.strictEqual(currentURL(), "/videos");
-    assert.dom(".video-shorts-comments-sheet").exists();
-    assert
-      .dom(".video-shorts-comments-surface__cooked")
-      .includesText("Visible to anonymous users");
-    assert
-      .dom("[data-video-shorts-reply-input]")
-      .doesNotExist("anonymous users get a read-only comments sheet");
+    assert.dom(".video-shorts-comments-panel").exists();
+    assert.dom(".cooked").includesText("Visible to anonymous users");
+    assert.dom("#reply-control.open").doesNotExist();
+    assert.dom(`${nativePostSelector(216)} .post-menu-area`).exists();
   });
 
-  test("comment report opens the native login flow when logged out", async function (assert) {
+  test("comment report opens native anonymous flag modal without leaving /videos", async function (assert) {
     setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
@@ -3462,11 +4547,26 @@ acceptance("Video Shorts comments sheet anonymous report", function (needs) {
       );
     });
 
-    await visit("/videos");
-    await click("[data-action='open-comments']");
-    await click('[data-post-id="215"] [data-action="comment-tools-toggle"]');
-    await click('[data-post-id="215"] [data-action="flag-comment"]');
+    const shownModals = [];
+    const modal = this.owner.lookup("service:modal");
+    const originalShow = modal.show;
 
-    assert.strictEqual(currentURL(), "/login");
+    modal.show = (component, options) => {
+      shownModals.push({ component, model: options?.model });
+    };
+
+    try {
+      await visit("/videos");
+      await click("[data-action='open-comments']");
+      await revealNativePostActions(215);
+      await click(nativePostActionSelector(215, "flag"));
+    } finally {
+      modal.show = originalShow;
+    }
+
+    assert.strictEqual(shownModals.length, 1);
+    assert.strictEqual(shownModals[0].component, AnonymousFlagModal);
+    assert.strictEqual(String(shownModals[0].model.flagModel.id), "215");
+    assert.strictEqual(currentURL(), "/videos");
   });
 });

@@ -11,6 +11,9 @@ zh_CN:
         open_topic: "打开话题"
       feed:
         item_aria: "%{title}，@%{username}，第 %{position} 个，共 %{total} 个"
+      player:
+        mute: "静音"
+        unmute: "打开声音"
       metadata:
         expand_excerpt: "展开"
         collapse_excerpt: "收起"
@@ -38,6 +41,7 @@ zh_CN:
         replies_error: "无法加载回复"
         retry_replies: "重试加载回复"
         empty: "还没有评论"
+        add_comment: "添加评论..."
         count:
           one: "%{count} 条回复"
           other: "%{count} 条回复"
@@ -50,6 +54,10 @@ zh_CN:
         reply: "回复"
         reply_to_user: "回复 %{username}"
         edit: "编辑"
+        edit_placeholder: "编辑评论"
+        edit_empty: "评论不能为空"
+        edit_load_error: "无法加载评论"
+        edit_save_error: "无法保存评论"
         tools: "评论工具"
         copy_link: "复制链接"
         open_in_topic: "在话题中打开"
@@ -80,6 +88,10 @@ zh_CN:
           sample_size: "样本数量"
           scan_limit: "扫描上限"
           scan_limit_reached: "已达到扫描上限"
+          delivery: "交付"
+          hls_requires_https: "HLS 需要 HTTPS"
+          hls_allowed_origins: "允许的 HLS 源"
+          none_configured: "未配置"
           sources: "来源"
           warnings:
             inaccessible_category_ids: "部分已配置的分类对当前管理员不可见。"

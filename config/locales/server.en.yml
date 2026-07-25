@@ -3,6 +3,7 @@ en:
     video_shorts_enabled: "Enable the video shorts feed."
     video_shorts_source_category_ids: "Category IDs eligible for the video shorts feed."
     video_shorts_source_tag_names: "Tag names eligible for the video shorts feed."
+    video_shorts_hls_allowed_origins: "Optional HTTPS HLS origins shown in diagnostics. HTTPS m3u8 playback is allowed even when an origin is not listed."
     video_shorts_excerpt_character_limit: "Number of excerpt characters shown on each video before the expand button appears."
     video_shorts_page_size: "Default page size for the video shorts feed."
     video_shorts_candidate_scan_limit: "Maximum post candidates scanned per video feed request. Keep this bounded; use object storage and a CDN for uploaded videos, and serve m3u8 playlists and segments from HTTPS CDN URLs where possible."

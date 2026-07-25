@@ -75,12 +75,12 @@ module DiscourseVideoShorts
       nil
     end
 
-    def hls_invalid_descriptor(normalized_url)
+    def hls_invalid_descriptor(normalized_url, reason = "hls_requires_https")
       {
         provider: "hls",
         renderability: "fallback",
         fallback: "post",
-        fallback_reason: "hls_requires_https",
+        fallback_reason: reason,
         dedupe_key: "hls:invalid:#{sha256(normalized_url)}",
       }
     end

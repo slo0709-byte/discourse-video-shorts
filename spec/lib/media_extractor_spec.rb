@@ -6,6 +6,7 @@ RSpec.describe DiscourseVideoShorts::MediaExtractor do
   before do
     SiteSetting.authorized_extensions =
       (SiteSetting.authorized_extensions.split("|") + %w[mp4 webm mov m4v]).uniq.join("|")
+    SiteSetting.video_shorts_hls_allowed_origins = "https://stream.example.com"
   end
 
   def extract(raw:, cooked: nil, uploads: [])
@@ -35,8 +36,8 @@ RSpec.describe DiscourseVideoShorts::MediaExtractor do
   end
 
   it "does not treat native uploads as playable when their extension is not allowed by Discourse settings" do
-    SiteSetting.authorized_extensions = "jpg|png"
     upload = Fabricate(:video_upload, extension: "mp4", original_filename: "clip.mp4")
+    SiteSetting.authorized_extensions = "jpg|png"
 
     descriptor = extract(raw: "native upload", uploads: [upload])
 
@@ -66,6 +67,28 @@ RSpec.describe DiscourseVideoShorts::MediaExtractor do
       dedupe_key: start_with("hls:invalid:"),
     )
     expect(descriptor).not_to have_key(:hls_url)
+  end
+
+  it "allows a cross-origin HTTPS M3U8 origin without an allowlist entry" do
+    descriptor = extract(raw: "https://untrusted.example.com/path/video.m3u8")
+
+    expect(descriptor).to include(
+      provider: "hls",
+      renderability: "hls",
+      hls_url: "https://untrusted.example.com/path/video.m3u8",
+      dedupe_key: start_with("hls:"),
+    )
+    expect(descriptor).not_to have_key(:fallback)
+  end
+
+  it "preserves an HTTPS HLS query while removing its fragment" do
+    descriptor = extract(raw: "https://stream.example.com/live/video.m3u8?token=x#fragment")
+
+    expect(descriptor).to include(
+      provider: "hls",
+      renderability: "hls",
+      hls_url: "https://stream.example.com/live/video.m3u8?token=x",
+    )
   end
 
   it "normalizes canonical Bilibili links as iframe candidates" do

@@ -46,6 +46,7 @@ module DiscourseVideoShorts
           guardian: guardian,
           page_size: safe_positive_integer(page_size_param),
           candidate_scan_limit: safe_positive_integer(scan_limit_param),
+          metadata_only: true,
         ).resolve
     end
 
@@ -108,6 +109,7 @@ module DiscourseVideoShorts
       posts = extracted.map(&:first)
       liked_post_ids = liked_post_ids(posts)
       bookmarks_by_post_id = bookmarks_by_post_id(posts)
+      comment_counts_by_post = CommentCount.call(posts: posts, guardian: guardian)
 
       extracted.map do |post, media|
         native_action_summary = native_action_summary(post)
@@ -117,27 +119,39 @@ module DiscourseVideoShorts
           liked_post_ids: liked_post_ids,
           bookmarks_by_post_id: bookmarks_by_post_id,
           native_action_summary: native_action_summary,
+          comment_count: comment_counts_by_post.fetch(post),
         )
       end
     end
 
-    def serialize_item(post, media, liked_post_ids:, bookmarks_by_post_id:, native_action_summary:)
+    def serialize_item(
+      post,
+      media,
+      liked_post_ids:,
+      bookmarks_by_post_id:,
+      native_action_summary:,
+      comment_count:
+    )
       topic = post.topic
+      message_bus_last_id = MessageBus.last_id("/topic/#{topic.id}")
+
       {
         topic_id: topic.id,
         post_id: post.id,
         post_number: post.post_number,
         topic_url: topic.relative_url,
         post_url: post.url,
+        comments_endpoint: "/video-shorts/comments/direct.json",
         title: topic.title,
         excerpt: PrettyText.excerpt(excerpt_html(post, media), 220, keep_emoji_images: false),
         username: post.user&.username,
         avatar_template: post.user&.avatar_template,
         created_at: post.created_at.iso8601(3),
+        message_bus_last_id: message_bus_last_id,
         visual_accent_color: visual_accent_color(topic),
         counts: {
           like_count: post.like_count,
-          reply_count: visible_reply_count(post),
+          reply_count: comment_count,
           bookmark_count: post.bookmark_count,
         },
         actions:
@@ -147,6 +161,9 @@ module DiscourseVideoShorts
             bookmarks_by_post_id: bookmarks_by_post_id,
             native_action_summary: native_action_summary,
           ),
+        topic_details: {
+          can_edit_staff_notes: guardian.can_edit_staff_notes?(topic),
+        },
         native_action_summary: native_action_summary,
         media: serialize_media(media, post),
       }
@@ -154,30 +171,6 @@ module DiscourseVideoShorts
 
     def native_action_summary(post)
       PostSerializer.new(post, scope: guardian, root: false).actions_summary
-    end
-
-    def visible_reply_count(post)
-      Post
-        .where(id: descendant_reply_ids(post))
-        .secured(guardian)
-        .where(post_type: Post.types[:regular], deleted_at: nil, hidden: false)
-        .count
-    end
-
-    def descendant_reply_ids(post)
-      seen_reply_ids = Set.new
-      frontier_post_ids = [post.id]
-
-      while frontier_post_ids.present?
-        reply_ids = PostReply.where(post_id: frontier_post_ids).pluck(:reply_post_id)
-        reply_ids -= seen_reply_ids.to_a
-        break if reply_ids.blank?
-
-        seen_reply_ids.merge(reply_ids)
-        frontier_post_ids = reply_ids
-      end
-
-      seen_reply_ids.to_a
     end
 
     def visual_accent_color(topic)
@@ -211,12 +204,12 @@ module DiscourseVideoShorts
 
     def excerpt_html(post, media)
       cooked = post.cooked.to_s
-      return cooked if %w[iframe_candidate hls].exclude?(media[:renderability])
+      return cooked if %w[iframe_candidate hls].exclude?(media[:renderability]) && media[:provider] != "hls"
 
       fragment = Nokogiri::HTML5.fragment(cooked)
       fragment.css("iframe").remove
       fragment.css("a[href]").each do |anchor|
-        anchor.remove if provider_source_anchor?(anchor["href"], media)
+        anchor.remove if provider_source_anchor?(anchor["href"], media) || hls_source_anchor?(anchor["href"], media)
       end
       fragment.traverse do |node|
         next if !node.text?
@@ -229,6 +222,14 @@ module DiscourseVideoShorts
             .gsub(IFRAME_FRAGMENT_TEXT_PATTERN, "")
       end
       fragment.to_html
+    end
+
+    def hls_source_anchor?(href, media)
+      return false if media[:provider] != "hls" || href.blank?
+
+      File.extname(URI.parse(href).path).casecmp(".m3u8").zero?
+    rescue URI::InvalidURIError
+      false
     end
 
     def provider_source_anchor?(href, media)

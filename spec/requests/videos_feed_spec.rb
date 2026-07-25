@@ -58,6 +58,7 @@ RSpec.describe "Discourse video shorts feed" do
     expect(response.status).to eq(200)
     item = response.parsed_body["items"].first
     expect(item).to include("topic_id" => post.topic_id, "post_id" => post.id)
+    expect(item["message_bus_last_id"]).to be_a(Integer)
     expect(item["media"]).to include(
       "provider" => "native",
       "renderability" => "native",
@@ -92,7 +93,25 @@ RSpec.describe "Discourse video shorts feed" do
     )
   end
 
-  it "serializes OP video replies as visible descendant comments" do
+  it "serializes Guardian-scoped native topic capabilities" do
+    category = Fabricate(:category)
+    make_video_post(category: category)
+    SiteSetting.video_shorts_source_category_ids = category.id.to_s
+
+    sign_in(admin)
+    get "/videos.json"
+    expect(response.parsed_body.dig("items", 0, "topic_details")).to include(
+      "can_edit_staff_notes" => true,
+    )
+
+    sign_in(user)
+    get "/videos.json"
+    expect(response.parsed_body.dig("items", 0, "topic_details")).to include(
+      "can_edit_staff_notes" => false,
+    )
+  end
+
+  it "serializes the complete OP topic discussion as visible video comments" do
     category = Fabricate(:category)
     video_post = create_post(category: category, raw: "Native video with discussion")
     upload = Fabricate(:video_upload, extension: "mp4", original_filename: "clip.mp4")
@@ -101,16 +120,16 @@ RSpec.describe "Discourse video shorts feed" do
     direct_reply(video_post, raw: "Second direct reply with enough detail")
     nested_reply = direct_reply(first_direct_reply, raw: "Nested reply with enough detail")
     direct_reply(nested_reply, raw: "Floor reply with enough detail")
-    Fabricate(
+    native_top_level_reply = Fabricate(
       :post,
       topic: video_post.topic,
-      raw: "Same topic but not in this video reply tree",
-      cooked: "<p>Same topic but not in this video reply tree</p>",
+      raw: "Native top-level topic reply",
+      cooked: "<p>Native top-level topic reply</p>",
     )
     SiteSetting.video_shorts_source_category_ids = category.id.to_s
 
     direct_reply_count = PostReply.where(post: video_post).count
-    visible_descendant_count = 4
+    visible_descendant_count = 5
     visible_topic_comment_count = video_post.topic.reload.posts_count - 1
 
     get "/videos.json"
@@ -119,8 +138,30 @@ RSpec.describe "Discourse video shorts feed" do
     expect(response.status).to eq(200)
     expect(item).to be_present
     expect(direct_reply_count).to eq(2)
-    expect(visible_descendant_count).to be < visible_topic_comment_count
+    expect(native_top_level_reply.reply_to_post_number).to be_nil
+    expect(visible_descendant_count).to eq(visible_topic_comment_count)
     expect(item["counts"]["reply_count"]).to eq(visible_descendant_count)
+  end
+
+  it "uses one batch comment-count traversal for all emitted feed posts" do
+    category = Fabricate(:category)
+    first_video = make_video_post(category: category, created_at: 2.minutes.ago)
+    second_video = make_video_post(category: category, created_at: 1.minute.ago)
+    direct_reply(first_video, raw: "First video reply")
+    direct_reply(second_video, raw: "Second video reply")
+    SiteSetting.video_shorts_source_category_ids = category.id.to_s
+
+    allow(DiscourseVideoShorts::CommentCount).to receive(:call).and_call_original
+
+    get "/videos.json"
+
+    expect(response.status).to eq(200)
+    expect(DiscourseVideoShorts::CommentCount).to have_received(:call).once
+    counts_by_post_id =
+      response.parsed_body["items"].to_h do |item|
+        [item["post_id"], item.dig("counts", "reply_count")]
+      end
+    expect(counts_by_post_id).to include(first_video.id => 1, second_video.id => 1)
   end
 
   it "excludes hidden OP video comments from the feed reply count" do
@@ -174,6 +215,30 @@ RSpec.describe "Discourse video shorts feed" do
     expect(direct_reply_count).to eq(2)
     expect(direct_reply_count).to be < visible_descendant_count
     expect(item["counts"]["reply_count"]).to eq(visible_descendant_count)
+  end
+
+  it "pins visible descendant counts and source-post permissions" do
+    group = Fabricate(:group)
+    group.add(user)
+    category = Fabricate(:private_category, group: group)
+    video_post = make_video_post(category: category, raw: "Private video with discussion")
+    direct = direct_reply(video_post, raw: "Visible direct reply")
+    nested = direct_reply(direct, raw: "Visible nested reply")
+    deleted = direct_reply(nested, raw: "Deleted descendant reply")
+    deleted.trash!(admin)
+    direct_reply(
+      Fabricate(:post, topic: video_post.topic, raw: "Native top-level reply"),
+      raw: "Native top-level descendant",
+    )
+    SiteSetting.video_shorts_source_category_ids = category.id.to_s
+
+    sign_in(user)
+    get "/videos.json"
+
+    expect(response.status).to eq(200)
+    item = response.parsed_body["items"].find { |candidate| candidate["post_id"] == video_post.id }
+    expect(item["counts"]["reply_count"]).to eq(4)
+    expect(item["actions"]).to include("can_like" => true, "can_reply" => true)
   end
 
   it "excludes private category videos for anonymous users" do
@@ -299,6 +364,32 @@ RSpec.describe "Discourse video shorts feed" do
     expect(item["excerpt"]).not_to include("player.bilibili.com")
   end
 
+  it "keeps an unlisted HTTPS HLS source playable without leaking it into the excerpt" do
+    category = Fabricate(:category)
+    hls_url = "https://untrusted.example.com/live/private-video.m3u8"
+    post =
+      make_text_post(
+        category: category,
+        raw: hls_url,
+        cooked:
+          "<p>Watch from the topic</p><p><a href=\"#{hls_url}\" class=\"onebox\">#{hls_url}</a></p>",
+      )
+    SiteSetting.video_shorts_source_category_ids = category.id.to_s
+    SiteSetting.video_shorts_hls_allowed_origins = ""
+
+    get "/videos.json"
+
+    item = response.parsed_body["items"].first
+    expect(item).to include("post_id" => post.id)
+    expect(item["media"]).to include(
+      "provider" => "hls",
+      "renderability" => "hls",
+      "hls_url" => hls_url,
+    )
+    expect(item["excerpt"]).to include("Watch from the topic")
+    expect(item["excerpt"]).not_to include("m3u8", "untrusted.example.com", "<a")
+  end
+
   it "scans past non-video candidates and resumes after scan-limit cursors" do
     category = Fabricate(:category)
     video = make_video_post(category: category, created_at: 2.minutes.ago)
@@ -354,6 +445,29 @@ RSpec.describe "Discourse video shorts feed" do
 
     expect(response.status).to eq(200)
     expect(response.parsed_body["items"].map { |item| item["post_id"] }).to include(older.id)
+  end
+
+  it "loads feed candidates only once while preserving scoped pagination" do
+    category = Fabricate(:category)
+    older = make_video_post(category: category, created_at: 2.minutes.ago)
+    newer = make_video_post(category: category, created_at: 1.minute.ago)
+    SiteSetting.video_shorts_source_category_ids = category.id.to_s
+
+    expect_any_instance_of(DiscourseVideoShorts::SourceSelection).not_to receive(:candidate_posts)
+
+    get "/videos.json", params: { page_size: 1 }
+
+    expect(response.status).to eq(200)
+    expect(response.parsed_body["items"].map { |item| item["post_id"] }).to eq([newer.id])
+    expect(response.parsed_body["next_cursor"]).to be_present
+    expect(response.parsed_body["scan_limit_reached"]).to eq(false)
+
+    get "/videos.json", params: { page_size: 1, cursor: response.parsed_body["next_cursor"] }
+
+    expect(response.status).to eq(200)
+    expect(response.parsed_body["items"].map { |item| item["post_id"] }).to eq([older.id])
+    expect(response.parsed_body["next_cursor"]).to be_nil
+    expect(response.parsed_body["scan_limit_reached"]).to eq(false)
   end
 
   it "returns the disabled JSON contract when the plugin setting is off" do

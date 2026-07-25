@@ -6,10 +6,16 @@ const VIDEO_SHORTS_BODY_CLASS = "video-shorts-route";
 const VIDEO_SHORTS_MOBILE_ROUTE_HEIGHT = "--video-shorts-mobile-route-height";
 const TEXT_INPUT_SELECTOR = "input, textarea, select, [contenteditable='true']";
 
-function postIdFromLocation() {
-  const postId = new URLSearchParams(window.location.search).get("post_id");
+function validPostId(value) {
+  const postId = value === null || value === undefined ? null : String(value);
 
   return /^\d+$/.test(postId || "") ? postId : null;
+}
+
+function postIdFromLocation() {
+  return validPostId(
+    new URLSearchParams(window.location.search).get("post_id")
+  );
 }
 
 export default class VideosRoute extends DiscourseRoute {
@@ -61,9 +67,13 @@ export default class VideosRoute extends DiscourseRoute {
     }
   }
 
-  async model() {
+  async model(_params, transition) {
+    const transitionPostId = validPostId(
+      transition?.to?.queryParams?.post_id
+    );
+
     return await loadInitialVideoShortsFeed({
-      restorePostId: postIdFromLocation(),
+      restorePostId: transitionPostId || postIdFromLocation(),
     });
   }
 

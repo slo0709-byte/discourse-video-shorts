@@ -11,6 +11,9 @@ en:
         open_topic: "Open topic"
       feed:
         item_aria: "%{title}, @%{username}, position %{position} of %{total}"
+      player:
+        mute: "Mute"
+        unmute: "Turn sound on"
       metadata:
         expand_excerpt: "Show more"
         collapse_excerpt: "Show less"
@@ -38,6 +41,7 @@ en:
         replies_error: "Could not load replies"
         retry_replies: "Retry loading replies"
         empty: "No comments yet"
+        add_comment: "Add a comment..."
         count:
           one: "%{count} reply"
           other: "%{count} replies"
@@ -50,6 +54,10 @@ en:
         reply: "Reply"
         reply_to_user: "Reply to %{username}"
         edit: "Edit"
+        edit_placeholder: "Edit comment"
+        edit_empty: "Comment cannot be empty"
+        edit_load_error: "Could not load comment"
+        edit_save_error: "Could not save comment"
         tools: "Comment tools"
         copy_link: "Copy link"
         open_in_topic: "Open in topic"
@@ -80,6 +88,10 @@ en:
           sample_size: "Sample size"
           scan_limit: "Scan limit"
           scan_limit_reached: "Scan limit reached"
+          delivery: "Delivery"
+          hls_requires_https: "HLS requires HTTPS"
+          hls_allowed_origins: "Allowed HLS origins"
+          none_configured: "None configured"
           sources: "Sources"
           warnings:
             inaccessible_category_ids: "Some configured categories are not visible to the current admin account."
