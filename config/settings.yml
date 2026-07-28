@@ -2,6 +2,10 @@ plugins:
   video_shorts_enabled:
     default: true
     client: true
+  video_shorts_youtube_enabled:
+    default: true
+  video_shorts_bilibili_enabled:
+    default: true
   video_shorts_source_category_ids:
     default: ""
     type: list

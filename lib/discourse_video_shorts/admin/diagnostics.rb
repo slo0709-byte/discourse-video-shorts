@@ -69,6 +69,8 @@ module DiscourseVideoShorts
           candidate_scan_limit: source.candidate_scan_limit,
           configured_page_size: SiteSetting.video_shorts_page_size,
           configured_candidate_scan_limit: SiteSetting.video_shorts_candidate_scan_limit,
+          youtube_enabled: ProviderPolicy.enabled?("youtube"),
+          bilibili_enabled: ProviderPolicy.enabled?("bilibili"),
           debug_mode: SiteSetting.video_shorts_debug_mode,
         }
       end

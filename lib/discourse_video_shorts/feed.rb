@@ -79,7 +79,8 @@ module DiscourseVideoShorts
 
         if guardian.can_see?(post.topic) && guardian.can_see?(post)
           media = MediaExtractorCache.extract_media_for_visible_post(post, guardian)
-          if media.present? && !dedupe_keys.include?(media[:dedupe_key])
+          if media.present? && ProviderPolicy.enabled?(media[:provider]) &&
+               !dedupe_keys.include?(media[:dedupe_key])
             dedupe_keys << media[:dedupe_key]
             extracted << [post, media]
           end

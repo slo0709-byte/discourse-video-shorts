@@ -219,6 +219,7 @@ module DiscourseVideoShorts
         video_shorts_enabled: SiteSetting.video_shorts_enabled,
         category_ids: category_ids,
         tag_names: tag_names,
+        provider_settings: ProviderPolicy.settings_snapshot,
         tagging_enabled: SiteSetting.tagging_enabled,
         category_match: CATEGORY_MATCH_VERSION,
         source_match: SOURCE_MATCH_VERSION,

@@ -6,6 +6,8 @@ RSpec.describe "Discourse video shorts feed" do
 
   before do
     SiteSetting.video_shorts_enabled = true
+    SiteSetting.video_shorts_youtube_enabled = true
+    SiteSetting.video_shorts_bilibili_enabled = true
     SiteSetting.video_shorts_source_category_ids = ""
     SiteSetting.video_shorts_source_tag_names = ""
     SiteSetting.video_shorts_page_size = 20
@@ -337,6 +339,46 @@ RSpec.describe "Discourse video shorts feed" do
     expect(item["media"]).not_to have_key("fallback")
   end
 
+  it "excludes YouTube only from the Shorts feed when YouTube support is disabled" do
+    category = Fabricate(:category)
+    youtube_post =
+      make_text_post(category: category, raw: "https://www.youtube.com/shorts/dQw4w9WgXcQ")
+    bilibili_post =
+      make_text_post(category: category, raw: "https://www.bilibili.com/video/BV1Q541167Qg")
+    youtube_raw = youtube_post.raw
+    SiteSetting.video_shorts_source_category_ids = category.id.to_s
+    SiteSetting.video_shorts_youtube_enabled = false
+
+    get "/videos.json"
+
+    items = response.parsed_body["items"]
+    expect(response.status).to eq(200)
+    expect(items.map { |item| item["post_id"] }).to include(bilibili_post.id)
+    expect(items.map { |item| item["post_id"] }).not_to include(youtube_post.id)
+    expect(youtube_post.reload.raw).to eq(youtube_raw)
+    expect(youtube_post.topic).to be_present
+  end
+
+  it "excludes Bilibili only from the Shorts feed when Bilibili support is disabled" do
+    category = Fabricate(:category)
+    youtube_post =
+      make_text_post(category: category, raw: "https://www.youtube.com/shorts/dQw4w9WgXcQ")
+    bilibili_post =
+      make_text_post(category: category, raw: "https://www.bilibili.com/video/BV1Q541167Qg")
+    bilibili_raw = bilibili_post.raw
+    SiteSetting.video_shorts_source_category_ids = category.id.to_s
+    SiteSetting.video_shorts_bilibili_enabled = false
+
+    get "/videos.json"
+
+    items = response.parsed_body["items"]
+    expect(response.status).to eq(200)
+    expect(items.map { |item| item["post_id"] }).to include(youtube_post.id)
+    expect(items.map { |item| item["post_id"] }).not_to include(bilibili_post.id)
+    expect(bilibili_post.reload.raw).to eq(bilibili_raw)
+    expect(bilibili_post.topic).to be_present
+  end
+
   it "serializes escaped provider iframes as embeds without leaking iframe markup into excerpt" do
     category = Fabricate(:category)
     post =
@@ -428,6 +470,27 @@ RSpec.describe "Discourse video shorts feed" do
     SiteSetting.video_shorts_source_category_ids = Fabricate(:category).id.to_s
 
     get "/videos.json", params: { cursor: valid_cursor }
+    expect(response.status).to eq(400)
+    expect(response.parsed_body).to include("error" => "invalid_cursor")
+  end
+
+  it "invalidates a cursor when provider support settings change" do
+    category = Fabricate(:category)
+    2.times do |index|
+      make_text_post(
+        category: category,
+        raw: "https://www.youtube.com/shorts/provider-cursor-#{index}",
+        created_at: index.minutes.ago,
+      )
+    end
+    SiteSetting.video_shorts_source_category_ids = category.id.to_s
+
+    get "/videos.json", params: { page_size: 1 }
+    cursor = response.parsed_body["next_cursor"]
+    SiteSetting.video_shorts_youtube_enabled = false
+
+    get "/videos.json", params: { cursor: cursor }
+
     expect(response.status).to eq(400)
     expect(response.parsed_body).to include("error" => "invalid_cursor")
   end

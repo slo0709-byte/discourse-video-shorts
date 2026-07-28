@@ -1,6 +1,8 @@
 zh_CN:
   site_settings:
     video_shorts_enabled: "启用视频短片信息流。"
+    video_shorts_youtube_enabled: "允许 YouTube 视频进入视频短片信息流。关闭后，原有 Discourse 主题和嵌入内容保持不变。"
+    video_shorts_bilibili_enabled: "允许哔哩哔哩视频进入视频短片信息流。关闭后，原有 Discourse 主题和嵌入内容保持不变。"
     video_shorts_source_category_ids: "可进入视频短片信息流的分类 ID。"
     video_shorts_source_tag_names: "可进入视频短片信息流的标签名称。"
     video_shorts_hls_allowed_origins: "诊断中显示的可选 HTTPS HLS 源。即使未列出来源，也允许播放 HTTPS m3u8。"

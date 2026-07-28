@@ -9,6 +9,8 @@ RSpec.describe "Discourse video shorts admin diagnostics" do
 
   before do
     SiteSetting.video_shorts_enabled = true
+    SiteSetting.video_shorts_youtube_enabled = true
+    SiteSetting.video_shorts_bilibili_enabled = true
     SiteSetting.video_shorts_source_category_ids = ""
     SiteSetting.video_shorts_source_tag_names = ""
     SiteSetting.video_shorts_page_size = 20
@@ -82,6 +84,28 @@ RSpec.describe "Discourse video shorts admin diagnostics" do
       include(
         "category" => include("id" => category.id, "name" => category.name, "slug" => category.slug),
       ),
+    )
+  end
+
+  it "reports and applies provider support settings" do
+    category = Fabricate(:category)
+    make_text_post(category: category, raw: "https://www.youtube.com/shorts/dQw4w9WgXcQ")
+    make_text_post(category: category, raw: "https://www.bilibili.com/video/BV1Q541167Qg")
+    SiteSetting.video_shorts_source_category_ids = category.id.to_s
+    SiteSetting.video_shorts_youtube_enabled = false
+    sign_in(admin)
+
+    get "/admin/plugins/discourse-video-shorts/diagnostics.json"
+
+    body = response.parsed_body
+    expect(response.status).to eq(200)
+    expect(body["settings_summary"]).to include(
+      "youtube_enabled" => false,
+      "bilibili_enabled" => true,
+    )
+    expect(body.dig("providers", "counts")).to include(
+      include("name" => "youtube", "count" => 0),
+      include("name" => "bilibili", "count" => 1),
     )
   end
 
