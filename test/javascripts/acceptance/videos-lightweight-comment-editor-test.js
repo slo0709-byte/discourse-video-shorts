@@ -1,4 +1,4 @@
-import { click, fillIn, visit } from "@ember/test-helpers";
+import { click, fillIn, settled, visit } from "@ember/test-helpers";
 import { test } from "qunit";
 import pretender, {
   pretenderHelpers,
@@ -249,10 +249,43 @@ acceptance(
         `${inlineEditor} [data-video-shorts-reply-input]`,
         "Discard me",
       );
-      await click(`${inlineEditor} [data-video-shorts-reply-cancel]`);
+      const actionRail = document.querySelector(".video-shorts-action-rail");
+      const cancelButton = document.querySelector(
+        `${inlineEditor} [data-video-shorts-reply-cancel]`,
+      );
+
+      assert.true(
+        document.body.classList.contains(
+          "video-shorts-lightweight-composer-open",
+        ),
+        "the feed is locked while the lightweight reply editor is open",
+      );
+
+      cancelButton.click();
+
+      assert.dom(inlineEditor).exists("the tracked editor is pending teardown");
+      assert.true(
+        document.body.classList.contains(
+          "video-shorts-lightweight-composer-open",
+        ),
+        "cancel keeps the feed locked until the editor teardown has rendered",
+      );
+
+      await settled();
 
       assert.dom(inlineEditor).doesNotExist();
       assert.dom("[data-video-shorts-comment-reply-dialog]").doesNotExist();
+      assert.false(
+        document.body.classList.contains(
+          "video-shorts-lightweight-composer-open",
+        ),
+        "the feed unlocks after the editor teardown is complete",
+      );
+      assert.strictEqual(
+        document.querySelector(".video-shorts-action-rail"),
+        actionRail,
+        "cancel preserves the mounted action rail",
+      );
       assert.strictEqual(postRequests.length, 0);
 
       await click('[data-action="native-top-level-reply"]');

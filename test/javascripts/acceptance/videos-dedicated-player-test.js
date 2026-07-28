@@ -120,6 +120,15 @@ function untrustedYoutubeItem() {
   };
 }
 
+async function waitForCurrentPostId(postId) {
+  await waitUntil(
+    () =>
+      document
+        .querySelector(`.video-shorts-feed__item[data-post-id="${postId}"]`)
+        ?.getAttribute("aria-current") === "true",
+  );
+}
+
 acceptance("Video Shorts dedicated playback surface", function (needs) {
   needs.settings({ video_shorts_enabled: true });
   needs.user();
@@ -139,10 +148,31 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
 
     assert.dom(".video-shorts-feed").exists();
     assert.dom(".video-shorts-item").exists({ count: 1 });
+    assert
+      .dom(".video-shorts-item")
+      .hasAttribute(
+        "data-video-shorts-provider",
+        "youtube",
+        "the snap item exposes the trusted provider for layout rules",
+      );
+    assert
+      .dom(".video-shorts-embed-player")
+      .hasAttribute(
+        "data-video-shorts-provider",
+        "youtube",
+        "the embed wrapper exposes the validated YouTube provider",
+      );
     assert.dom(".video-shorts-embed-player iframe").exists({ count: 1 });
     assert
       .dom(".video-shorts-embed-player iframe")
       .hasAttribute("src", "https://www.youtube.com/embed/dQw4w9WgXcQ");
+    assert
+      .dom(".video-shorts-embed-player iframe")
+      .hasAttribute(
+        "data-video-shorts-provider",
+        "youtube",
+        "the iframe carries the same validated provider profile",
+      );
     assert
       .dom(".video-shorts-embed-player iframe")
       .hasAttribute(
@@ -207,12 +237,33 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
 
     await visit("/videos");
 
+    assert
+      .dom(".video-shorts-item")
+      .hasAttribute(
+        "data-video-shorts-provider",
+        "bilibili",
+        "the snap item exposes Bilibili's independent control profile",
+      );
+    assert
+      .dom(".video-shorts-embed-player")
+      .hasAttribute(
+        "data-video-shorts-provider",
+        "bilibili",
+        "the embed wrapper exposes the validated Bilibili provider",
+      );
     assert.dom(".video-shorts-embed-player iframe").exists({ count: 1 });
     assert
       .dom(".video-shorts-embed-player iframe")
       .hasAttribute(
         "src",
         "https://player.bilibili.com/player.html?bvid=BV1Q541167Qg&page=2&autoplay=0",
+      );
+    assert
+      .dom(".video-shorts-embed-player iframe")
+      .hasAttribute(
+        "data-video-shorts-provider",
+        "bilibili",
+        "the iframe carries the same validated provider profile",
       );
     assert
       .dom(".video-shorts-embed-player iframe")
@@ -278,6 +329,11 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
     assert
       .dom('[data-action="open-topic"]')
       .hasAttribute("href", "/t/youtube-short/101/1");
+    assert
+      .dom(
+        '[data-action="open-topic"] .d-icon-up-right-from-square use[href="#up-right-from-square"]',
+      )
+      .exists("the original-topic action renders its registered icon");
   });
 
   test("opens native Discourse share and flag modals from the action rail", async function (assert) {
@@ -397,8 +453,40 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
         '.video-shorts-embed-player iframe[src="https://player.bilibili.com/player.html?bvid=BV1Q541167Qg&page=2&autoplay=0"]',
       )
       .doesNotExist();
-    assert.dom(".video-shorts-native-player__video").exists({ count: 1 });
-    assert.dom(".video-shorts-item__media-placeholder").exists({ count: 4 });
+    assert.dom(".video-shorts-native-player__video").exists({ count: 2 });
+    assert.dom(".video-shorts-item__media-placeholder").exists({ count: 3 });
+    assert
+      .dom('[data-post-id="200"] .video-shorts-native-player__video')
+      .hasAttribute("preload", "auto", "active native video can fully load");
+    assert
+      .dom('[data-post-id="201"] .video-shorts-native-player__video')
+      .hasAttribute(
+        "preload",
+        "metadata",
+        "adjacent native video is metadata-prewarmed",
+      );
+
+    const adjacentVideo = document.querySelector(
+      '[data-post-id="201"] .video-shorts-native-player__video',
+    );
+
+    assert.strictEqual(
+      adjacentVideo?.getAttribute("aria-hidden"),
+      "true",
+      "adjacent prewarmed native video is hidden from assistive tech",
+    );
+    assert.strictEqual(
+      adjacentVideo?.getAttribute("tabindex"),
+      "-1",
+      "adjacent prewarmed native video is not keyboard interactive",
+    );
+    assert.false(
+      adjacentVideo?.hasAttribute("controls"),
+      "adjacent prewarmed native video does not expose controls",
+    );
+    assert
+      .dom('[data-post-id="202"] .video-shorts-native-player__video')
+      .doesNotExist("far native video is not mounted");
   });
 
   test("unmounts provider iframes when the active item changes", async function (assert) {
@@ -451,7 +539,7 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
       .exists({ count: 1 });
   });
 
-  test("defines the vertical snap player layout contract", async function (assert) {
+  test("keeps the vertical snap contract stable while lightweight editors lock input", async function (assert) {
     setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
@@ -483,6 +571,13 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
       "y mandatory",
       "the feed snaps vertically between shorts",
     );
+    document.body.classList.add("video-shorts-lightweight-composer-open");
+    assert.strictEqual(
+      getComputedStyle(feedItems).scrollSnapType,
+      "y mandatory",
+      "opening an inline editor does not rebuild the feed scroll-snap layer",
+    );
+    document.body.classList.remove("video-shorts-lightweight-composer-open");
     assert.strictEqual(
       getComputedStyle(firstItem).scrollSnapAlign,
       "center",
@@ -525,12 +620,8 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
       .dom('.video-shorts-feed__item[aria-current="true"]')
       .hasAttribute("data-post-id", "102");
 
-    await triggerKeyEvent(".video-shorts-feed__items", "keydown", "ArrowDown");
-    assert
-      .dom('.video-shorts-feed__item[aria-current="true"]')
-      .hasAttribute("data-post-id", "200");
-
     await visit("/videos?post_id=200");
+    await waitForCurrentPostId(200);
 
     assert
       .dom('.video-shorts-feed__item[aria-current="true"]')

@@ -82,16 +82,25 @@ RSpec.describe "Discourse video shorts feed" do
 
   it "serializes native post action summary fields for frontend action wiring" do
     category = Fabricate(:category)
-    make_video_post(category: category)
+    post = make_video_post(category: category)
     SiteSetting.video_shorts_source_category_ids = category.id.to_s
+    PostActionCreator.like(user, post)
     sign_in(user)
 
     get "/videos.json"
 
     item = response.parsed_body["items"].first
+    like_summary =
+      item["native_action_summary"].find do |action|
+        action["id"] == PostActionType.types[:like]
+      end
+
     expect(item["native_action_summary"]).to be_an(Array)
-    expect(item["native_action_summary"]).to include(
-      include("id" => PostActionType.types[:like], "can_act" => true),
+    expect(item["actions"]).to include("liked" => true, "can_like" => true)
+    expect(like_summary).to include(
+      "id" => PostActionType.types[:like],
+      "count" => 1,
+      "can_act" => true,
     )
   end
 

@@ -12,7 +12,7 @@ export default <template>
       title={{i18n "video_shorts.back"}}
       {{on "click" @controller.goBack}}
     >
-      {{dIcon "bars"}}
+      {{dIcon "arrow-left"}}
     </button>
 
     {{#if @controller.error}}
@@ -39,6 +39,7 @@ export default <template>
         @items={{@controller.items}}
         @initialActivePostId={{@controller.initialActivePostId}}
         @onActivePostIdChange={{@controller.replaceActivePostId}}
+        @onNearEnd={{@controller.loadMoreNearEnd}}
       />
     {{/if}}
 

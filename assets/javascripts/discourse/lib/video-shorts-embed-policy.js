@@ -46,6 +46,7 @@ export function trustedVideoShortsIframe(media) {
     }
 
     return {
+      provider: media.provider,
       src: url.toString(),
       title: `${media.provider} video embed`,
       allow: VIDEO_SHORTS_IFRAME_ALLOW,

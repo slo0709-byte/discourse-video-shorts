@@ -29,6 +29,8 @@ export default class VideoShortsActionRail extends Component {
   @tracked bookmarkId = this.args.item?.actions?.bookmark_id || null;
   @tracked likeCountValue = this.args.item?.counts?.like_count || 0;
   @tracked bookmarkCountValue = this.args.item?.counts?.bookmark_count || 0;
+  @tracked likePending = false;
+  @tracked bookmarkPending = false;
 
   nativeTopicIdentity = null;
   nativeTopic = null;
@@ -46,6 +48,26 @@ export default class VideoShortsActionRail extends Component {
 
   get bookmarkCount() {
     return this.formatCount(this.bookmarkCountValue);
+  }
+
+  get likeButtonClass() {
+    return `video-shorts-action-rail__button ${
+      this.liked ? "is-active" : ""
+    } ${this.likePending ? "is-pending" : ""}`;
+  }
+
+  get bookmarkButtonClass() {
+    return `video-shorts-action-rail__button ${
+      this.bookmarked ? "is-active" : ""
+    } ${this.bookmarkPending ? "is-pending" : ""}`;
+  }
+
+  get likeDisabled() {
+    return !this.canLike || this.likePending;
+  }
+
+  get bookmarkDisabled() {
+    return !this.canBookmark || this.bookmarkPending;
   }
 
   formatCount(value) {
@@ -75,7 +97,12 @@ export default class VideoShortsActionRail extends Component {
       return true;
     }
 
-    return Boolean(this.args.item?.actions?.can_like || this.liked);
+    const actions = this.args.item?.actions;
+    const likeAction = this.args.item?.native_action_summary?.find(
+      (itemAction) => itemAction.id === this.likeActionTypeId
+    );
+
+    return Boolean(actions?.can_like || likeAction?.can_undo || this.liked);
   }
 
   get canBookmark() {
@@ -159,18 +186,23 @@ export default class VideoShortsActionRail extends Component {
       return this.showLogin();
     }
 
-    if (!this.canLike || !this.likeActionTypeId) {
+    if (this.likePending || !this.canLike || !this.likeActionTypeId) {
       return;
     }
 
+    const previousLiked = this.liked;
+    const previousCount = this.likeCountValue;
+
+    this.likePending = true;
+    this.liked = !previousLiked;
+    this.likeCountValue = Math.max(previousCount + (previousLiked ? -1 : 1), 0);
+
     try {
-      if (this.liked) {
+      if (previousLiked) {
         await ajax(`/post_actions/${this.args.item.post_id}`, {
           type: "DELETE",
           data: { post_action_type_id: this.likeActionTypeId },
         });
-        this.liked = false;
-        this.likeCountValue = Math.max(this.likeCountValue - 1, 0);
       } else {
         await ajax("/post_actions", {
           type: "POST",
@@ -179,11 +211,13 @@ export default class VideoShortsActionRail extends Component {
             post_action_type_id: this.likeActionTypeId,
           },
         });
-        this.liked = true;
-        this.likeCountValue += 1;
       }
     } catch (error) {
+      this.liked = previousLiked;
+      this.likeCountValue = previousCount;
       popupAjaxError(error);
+    } finally {
+      this.likePending = false;
     }
   }
 
@@ -193,36 +227,68 @@ export default class VideoShortsActionRail extends Component {
       return this.showLogin();
     }
 
-    if (!this.canBookmark) {
+    if (this.bookmarkPending || !this.canBookmark) {
       return;
     }
 
+    if (this.bookmarked && !this.bookmarkId) {
+      return;
+    }
+
+    const previousBookmarked = this.bookmarked;
+    const previousBookmarkId = this.bookmarkId;
+    const previousCount = this.bookmarkCountValue;
+
+    this.bookmarkPending = true;
+
     if (this.bookmarked && this.bookmarkId) {
       try {
-        await ajax(`/bookmarks/${this.bookmarkId}.json`, {
-          method: "DELETE",
-        });
         this.bookmarked = false;
         this.bookmarkId = null;
-        this.bookmarkCountValue = Math.max(this.bookmarkCountValue - 1, 0);
+        this.bookmarkCountValue = Math.max(previousCount - 1, 0);
+
+        await ajax(`/bookmarks/${previousBookmarkId}.json`, {
+          method: "DELETE",
+        });
       } catch (error) {
+        this.bookmarked = previousBookmarked;
+        this.bookmarkId = previousBookmarkId;
+        this.bookmarkCountValue = previousCount;
         popupAjaxError(error);
+      } finally {
+        this.bookmarkPending = false;
       }
 
       return;
     }
 
-    const bookmark = this.bookmarkApi.buildNewBookmark(
-      "Post",
-      this.args.item.post_id
-    );
-    const formData = new BookmarkFormData(bookmark);
-    const saved = await this.bookmarkApi.create(formData);
+    try {
+      this.bookmarked = true;
+      this.bookmarkCountValue = previousCount + 1;
 
-    if (saved) {
+      const bookmark = this.bookmarkApi.buildNewBookmark(
+        "Post",
+        this.args.item.post_id
+      );
+      const formData = new BookmarkFormData(bookmark);
+      const saved = await this.bookmarkApi.create(formData);
+
+      if (!saved) {
+        this.bookmarked = previousBookmarked;
+        this.bookmarkId = previousBookmarkId;
+        this.bookmarkCountValue = previousCount;
+        return;
+      }
+
       this.bookmarked = true;
       this.bookmarkId = saved.id;
-      this.bookmarkCountValue += 1;
+    } catch (error) {
+      this.bookmarked = previousBookmarked;
+      this.bookmarkId = previousBookmarkId;
+      this.bookmarkCountValue = previousCount;
+      popupAjaxError(error);
+    } finally {
+      this.bookmarkPending = false;
     }
   }
 
@@ -284,10 +350,12 @@ export default class VideoShortsActionRail extends Component {
     <div class="video-shorts-action-rail">
       <button
         type="button"
-        class="video-shorts-action-rail__button"
+        class={{this.likeButtonClass}}
         data-action="like"
         aria-label={{i18n "video_shorts.actions.like"}}
-        disabled={{not this.canLike}}
+        aria-pressed={{if this.liked "true" "false"}}
+        aria-busy={{if this.likePending "true" "false"}}
+        disabled={{this.likeDisabled}}
         {{on "click" this.toggleLike}}
       >
         {{dIcon (if this.liked "d-liked" "d-unliked")}}
@@ -296,14 +364,18 @@ export default class VideoShortsActionRail extends Component {
 
       <button
         type="button"
-        class="video-shorts-action-rail__button"
+        class={{this.bookmarkButtonClass}}
         data-action="bookmark"
         aria-label={{i18n "video_shorts.actions.bookmark"}}
-        disabled={{not this.canBookmark}}
+        aria-pressed={{if this.bookmarked "true" "false"}}
+        aria-busy={{if this.bookmarkPending "true" "false"}}
+        disabled={{this.bookmarkDisabled}}
         {{on "click" this.toggleBookmark}}
       >
         {{dIcon "bookmark"}}
-        <span class="video-shorts-action-rail__count">{{this.bookmarkCount}}</span>
+        <span
+          class="video-shorts-action-rail__count"
+        >{{this.bookmarkCount}}</span>
       </button>
 
       <button
@@ -344,7 +416,7 @@ export default class VideoShortsActionRail extends Component {
         href={{@item.post_url}}
         aria-label={{i18n "video_shorts.actions.open_topic"}}
       >
-        {{dIcon "external-link"}}
+        {{dIcon "up-right-from-square"}}
       </a>
     </div>
   </template>

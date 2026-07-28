@@ -1,4 +1,10 @@
-import { click, currentURL, triggerKeyEvent, visit } from "@ember/test-helpers";
+import {
+  click,
+  currentURL,
+  triggerKeyEvent,
+  visit,
+  waitUntil,
+} from "@ember/test-helpers";
 import { test } from "qunit";
 import pretender, {
   pretenderHelpers,
@@ -235,12 +241,55 @@ function ruleTextsFor(selectorMatcher) {
   });
 }
 
+function keyframeTextsFor(animationName) {
+  return [...document.styleSheets].flatMap((sheet) => {
+    try {
+      return [...sheet.cssRules]
+        .filter((rule) => rule.name === animationName)
+        .map((rule) => rule.cssText);
+    } catch {
+      return [];
+    }
+  });
+}
+
+function reducedMotionRuleTextsFor(selectorMatcher) {
+  return [...document.styleSheets].flatMap((sheet) => {
+    try {
+      return [...sheet.cssRules].flatMap((rule) => {
+        if (
+          !rule.conditionText?.includes("prefers-reduced-motion: reduce")
+        ) {
+          return [];
+        }
+
+        return [...rule.cssRules]
+          .filter((nestedRule) =>
+            selectorMatcher(nestedRule.selectorText || ""),
+          )
+          .map((nestedRule) => nestedRule.cssText);
+      });
+    } catch {
+      return [];
+    }
+  });
+}
+
 function nativePostSelector(postId) {
   return `[data-video-shorts-native-comment][data-post-id="${postId}"]`;
 }
 
 function nativePostActionSelector(postId, action) {
   return `${nativePostSelector(postId)} .post-action-menu__${action}, [data-content] .post-action-menu__${action}`;
+}
+
+async function waitForActivePostId(postId) {
+  await waitUntil(
+    () =>
+      document
+        .querySelector(".video-shorts-feed__viewport")
+        ?.getAttribute("data-active-post-id") === String(postId),
+  );
 }
 
 async function revealNativePostActions(postId) {
@@ -651,7 +700,7 @@ acceptance("Video Shorts refined layout contract", function (needs) {
     }
   });
 
-  test("mobile video route exposes top hamburger control instead of bottom tabs", async function (assert) {
+  test("mobile video route exposes a transparent back control instead of bottom tabs", async function (assert) {
     setupPretender((server, helper) => {
       server.get("/videos.json", () =>
         helper.response({
@@ -688,8 +737,23 @@ acceptance("Video Shorts refined layout contract", function (needs) {
       "video route back control keeps a hit-testable touch target",
     );
     assert
+      .dom(".video-shorts-mobile-back .d-icon-arrow-left")
+      .exists("top route control uses Discourse's back arrow icon");
+    assert
       .dom(".video-shorts-mobile-back .d-icon-bars")
-      .exists("top route control uses a hamburger icon");
+      .doesNotExist("the back control is not represented by a menu icon");
+    const mobileBackStyle = getComputedStyle(
+      document.querySelector(".video-shorts-mobile-back"),
+    );
+    assert.false(
+      hasPaintedBackground(mobileBackStyle),
+      "the back control keeps a transparent surface",
+    );
+    assert.strictEqual(
+      mobileBackStyle.boxShadow,
+      "none",
+      "the back control keeps a transparent, shadow-free surface",
+    );
     assert
       .dom("body.video-shorts-route .x-bottom-tabs")
       .doesNotExist(
@@ -733,6 +797,38 @@ acceptance("Video Shorts refined layout contract", function (needs) {
         .map((selector) => selector.trim())
         .includes(".video-shorts-item__info"),
     );
+    const mobileRailRules = mobileRuleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .includes(".video-shorts-action-rail"),
+    );
+    const youtubeProviderRules = mobileRuleTextsFor((selectorText) =>
+      selectorText.includes(
+        '.video-shorts-item[data-video-shorts-provider="youtube"]',
+      ),
+    );
+    const bilibiliProviderRules = mobileRuleTextsFor((selectorText) =>
+      selectorText.includes(
+        '.video-shorts-item[data-video-shorts-provider="bilibili"]',
+      ),
+    );
+    const desktopYoutubeProviderRules = desktopRuleTextsFor((selectorText) =>
+      selectorText.includes(
+        '.video-shorts-item[data-video-shorts-provider="youtube"]',
+      ),
+    );
+    const desktopBilibiliProviderRules = desktopRuleTextsFor((selectorText) =>
+      selectorText.includes(
+        '.video-shorts-item[data-video-shorts-provider="bilibili"]',
+      ),
+    );
+    const desktopInfoRules = desktopRuleTextsFor((selectorText) =>
+      selectorText.includes(".video-shorts-item__info"),
+    );
+    const desktopInfoMarginRules = desktopInfoRules.filter((cssText) =>
+      cssText.includes("margin:"),
+    );
     const rail = item.querySelector(".video-shorts-action-rail");
     const railStyle = getComputedStyle(rail);
     const railButton = rail.querySelector('[data-action="open-comments"]');
@@ -742,6 +838,39 @@ acceptance("Video Shorts refined layout contract", function (needs) {
         .split(",")
         .map((selector) => selector.trim())
         .includes(".video-shorts-action-rail__button"),
+    );
+    const editorInputRules = ruleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .includes(".video-shorts-comments-surface__reply-editor textarea"),
+    );
+    const editorInputFocusRules = ruleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .some(
+          (selector) =>
+            selector ===
+              ".video-shorts-comments-surface__reply-editor textarea:focus" ||
+            selector ===
+              ".video-shorts-comments-surface__reply-editor textarea:focus-visible",
+        ),
+    );
+    const chromeTransitionRules = ruleTextsFor(
+      (selectorText) =>
+        selectorText.includes(".video-shorts-item__info") &&
+        selectorText.includes(".video-shorts-action-rail"),
+    );
+    const pendingChromeRules = ruleTextsFor((selectorText) =>
+      selectorText.includes(
+        '.video-shorts-item[data-video-shorts-chrome="pending"]',
+      ),
+    );
+    const reducedChromeRules = reducedMotionRuleTextsFor(
+      (selectorText) =>
+        selectorText.includes(".video-shorts-item__info") &&
+        selectorText.includes(".video-shorts-action-rail"),
     );
 
     assert.deepEqual(
@@ -780,14 +909,77 @@ acceptance("Video Shorts refined layout contract", function (needs) {
     );
     assert.true(
       mobileInfoRules.some((cssText) =>
-        cssText.includes("--video-shorts-mobile-playbar-reserve"),
+        cssText.includes(
+          "--video-shorts-mobile-metadata-controls-reserve",
+        ),
       ),
-      "mobile metadata reserve is named as the bottom playback control area",
+      "mobile metadata consumes a named provider control reserve",
     );
-    assert.deepEqual(
-      mobileInfoRules.filter((cssText) => cssText.includes("7.5rem")),
-      [],
-      "mobile metadata no longer reserves a large vertical gap above the playbar",
+    assert.true(
+      mobileInfoRules.some(
+        (cssText) =>
+          cssText.includes("position: absolute") &&
+          cssText.includes("overflow-anchor: none"),
+      ),
+      "mutable metadata is outside snap-item sizing and scroll anchoring",
+    );
+    assert.true(
+      mobileRailRules.some((cssText) =>
+        cssText.includes("--video-shorts-mobile-rail-controls-reserve"),
+      ),
+      "mobile action rail independently consumes the provider control reserve",
+    );
+    assert.true(
+      youtubeProviderRules.some(
+        (cssText) =>
+          cssText.includes(
+            "--video-shorts-mobile-metadata-controls-reserve: 7.5rem",
+          ) &&
+          cssText.includes(
+            "--video-shorts-mobile-rail-controls-reserve: 7.5rem",
+          ),
+      ),
+      "YouTube reserves its measured elevated progress and bottom-control band",
+    );
+    assert.true(
+      bilibiliProviderRules.some(
+        (cssText) =>
+          cssText.includes(
+            "--video-shorts-mobile-metadata-controls-reserve: 4rem",
+          ) &&
+          cssText.includes(
+            "--video-shorts-mobile-rail-controls-reserve: 3.25rem",
+          ),
+      ),
+      "Bilibili metadata adds breathing room above its 44px control bar while the rail keeps the measured reserve",
+    );
+    assert.true(
+      desktopYoutubeProviderRules.some((cssText) =>
+        cssText.includes(
+          "--video-shorts-desktop-metadata-controls-reserve: 7.5rem",
+        ),
+      ),
+      "desktop YouTube metadata clears its elevated progress and control band",
+    );
+    assert.true(
+      desktopBilibiliProviderRules.some((cssText) =>
+        cssText.includes(
+          "--video-shorts-desktop-metadata-controls-reserve: 3.25rem",
+        ),
+      ),
+      "desktop Bilibili metadata clears its independent bottom control bar",
+    );
+    assert.true(
+      desktopInfoMarginRules.length >= 2,
+      "desktop metadata has margin rules with comments open or closed",
+    );
+    assert.true(
+      desktopInfoMarginRules.every((cssText) =>
+        cssText.includes(
+          "--video-shorts-desktop-metadata-controls-reserve",
+        ),
+      ),
+      "every desktop metadata margin consumes the provider reserve",
     );
     assert.true(
       railStyle.zIndex > infoStyle.zIndex,
@@ -816,6 +1008,49 @@ acceptance("Video Shorts refined layout contract", function (needs) {
       railButtonStyle.boxShadow,
       "none",
       "comments rail button does not draw a square/card shadow",
+    );
+    assert.true(
+      editorInputRules.some(
+        (cssText) =>
+          cssText.includes("border: var(--d-input-border") &&
+          cssText.includes("color: var(--d-input-text-color") &&
+          cssText.includes("background: var(--d-input-bg-color"),
+      ),
+      "reply and edit textareas inherit Discourse's semantic input tokens",
+    );
+    assert.true(
+      editorInputFocusRules.some(
+        (cssText) =>
+          cssText.includes(
+            "border-color: var(--d-input-border-focus, var(--tertiary))",
+          ) && cssText.includes("box-shadow: none"),
+      ),
+      "reply and edit textareas paint one Discourse theme-owned focus border",
+    );
+    assert.true(
+      chromeTransitionRules.some(
+        (cssText) =>
+          cssText.includes("--video-shorts-chrome-reveal-duration") &&
+          cssText.includes("--video-shorts-chrome-reveal-delay") &&
+          cssText.includes("visibility") &&
+          cssText.match(/--video-shorts-chrome-reveal-delay/g)?.length >= 2,
+      ),
+      "metadata and actions stay hidden and non-hit-testable until the token-driven fade begins",
+    );
+    assert.true(
+      pendingChromeRules.some(
+        (cssText) =>
+          cssText.includes("visibility: hidden") &&
+          cssText.includes("opacity: 0") &&
+          cssText.includes("pointer-events: none"),
+      ),
+      "pending chrome keeps its layout while remaining non-visible and non-interactive",
+    );
+    assert.true(
+      reducedChromeRules.some((cssText) =>
+        cssText.includes("transition: none"),
+      ),
+      "reduced-motion users receive the final chrome without a fade",
     );
     assert.false(
       mobileRuleTextsFor((selector) =>
@@ -859,6 +1094,13 @@ acceptance("Video Shorts refined layout contract", function (needs) {
       .hasAttribute("data-comments-post-id", "401");
 
     await triggerKeyEvent(".video-shorts-feed__items", "keydown", "ArrowDown");
+    await waitForActivePostId(402);
+    await waitUntil(
+      () =>
+        document
+          .querySelector(".video-shorts-comments-panel")
+          ?.getAttribute("data-comments-post-id") === "402",
+    );
 
     assert
       .dom(".video-shorts-feed__viewport")
@@ -955,6 +1197,7 @@ acceptance("Video Shorts refined layout contract", function (needs) {
     );
 
     await triggerKeyEvent(".video-shorts-feed__items", "keydown", "ArrowDown");
+    await waitForActivePostId(602);
 
     assert
       .dom(".video-shorts-feed__viewport")
@@ -1470,6 +1713,12 @@ acceptance("Video Shorts refined mobile route shell", function (needs) {
         .map((selector) => selector.trim())
         .includes("body.video-shorts-route .video-shorts-feed"),
     );
+    const routeItemsRules = mobileRuleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .includes("body.video-shorts-route .video-shorts-feed__items"),
+    );
     const mobileFeedRules = mobileRuleTextsFor((selectorText) =>
       selectorText
         .split(",")
@@ -1506,6 +1755,18 @@ acceptance("Video Shorts refined mobile route shell", function (needs) {
           cssText.includes("height: var(--video-shorts-mobile-route-height)"),
       ),
       "mobile feed height follows the dynamic route height",
+    );
+    assert.true(
+      routeFeedRules.some((cssText) => cssText.includes("padding: 0px")),
+      "mobile feed overrides surrounding theme gutters for a full-bleed player",
+    );
+    assert.true(
+      routeItemsRules.some(
+        (cssText) =>
+          cssText.includes("scrollbar-gutter: auto") &&
+          cssText.includes("scrollbar-width: none"),
+      ),
+      "mobile feed does not reserve a visible scrollbar gutter beside the player",
     );
     assert.true(
       mobileFeedRules.some((cssText) =>
@@ -1624,10 +1885,13 @@ acceptance("Video Shorts refined mobile route shell", function (needs) {
     assert.true(
       infoRules.some(
         (cssText) =>
-          cssText.includes("grid-area: 1 / 1") &&
-          !cssText.includes("position: absolute"),
+          cssText.includes("position: absolute") &&
+          cssText.includes(
+            "--video-shorts-mobile-metadata-controls-reserve",
+          ) &&
+          cssText.includes("overflow-anchor: none"),
       ),
-      "mobile metadata is stage-aligned instead of positioned against the full viewport",
+      "mobile metadata is absolutely anchored above the provider-specific control reserve",
     );
     assert.strictEqual(
       stageScrimRules.length,
@@ -1658,6 +1922,89 @@ acceptance("Video Shorts refined mobile route shell", function (needs) {
       fullPageFixedOverlays,
       [],
       "mobile route does not create html/body/feed fixed full-page overlays",
+    );
+  });
+
+  test("mobile comments sheet stays fixed while asynchronous comments mount", function (assert) {
+    const sheetEntranceRules = mobileRuleTextsFor((selectorText) =>
+      selectorText.includes(
+        ".video-shorts-comments-sheet .d-modal__container.is-entering",
+      ),
+    );
+    const sheetExitRules = mobileRuleTextsFor((selectorText) =>
+      selectorText.includes(
+        ".video-shorts-comments-sheet .d-modal__container.is-exiting",
+      ),
+    );
+    const reducedMotionSheetRules = reducedMotionRuleTextsFor((selectorText) =>
+      selectorText.includes(
+        ".video-shorts-comments-sheet .d-modal__container",
+      ),
+    );
+    const sheetBackdropRules = mobileRuleTextsFor((selectorText) =>
+      selectorText.includes(
+        ".video-shorts-comments-sheet + .d-modal__backdrop",
+      ),
+    );
+    const entranceKeyframes = keyframeTextsFor(
+      "video-shorts-comments-sheet-fade-enter",
+    );
+    const exitKeyframes = keyframeTextsFor(
+      "video-shorts-comments-sheet-fade-exit",
+    );
+
+    assert.true(
+      sheetEntranceRules.some(
+        (cssText) =>
+          cssText.includes("video-shorts-comments-sheet-fade-enter") &&
+          cssText.includes("120ms") &&
+          cssText.includes("cubic-bezier(0.2, 0, 0, 1)"),
+      ),
+      "mobile comments use a short plugin-owned fade entrance",
+    );
+    assert.true(
+      sheetExitRules.some(
+        (cssText) =>
+          cssText.includes("video-shorts-comments-sheet-fade-exit") &&
+          cssText.includes("100ms") &&
+          cssText.includes("cubic-bezier(0.4, 0, 1, 1)"),
+      ),
+      "mobile comments use a short plugin-owned fade exit",
+    );
+    assert.true(
+      entranceKeyframes.length > 0,
+      "the fixed-position sheet entrance keyframes are defined",
+    );
+    assert.true(
+      exitKeyframes.length > 0,
+      "the fixed-position sheet exit keyframes are defined",
+    );
+    assert.true(
+      [...entranceKeyframes, ...exitKeyframes].every(
+        (cssText) =>
+          cssText.includes("opacity") &&
+          !/\b(?:translate|scale|rotate)\b/.test(cssText),
+      ),
+      "the sheet never changes position while comments mount",
+    );
+    assert.true(
+      sheetBackdropRules.some((cssText) => cssText.includes("120ms")),
+      "the backdrop settles with the sheet instead of continuing for 300ms",
+    );
+    assert.deepEqual(
+      [...sheetEntranceRules, ...sheetExitRules].filter(
+        (cssText) =>
+          cssText.includes("modal-enter-mobile") ||
+          cssText.includes("modal-exit-mobile"),
+      ),
+      [],
+      "the mobile comments sheet does not inherit full-height Discourse modal motion",
+    );
+    assert.true(
+      reducedMotionSheetRules.some((cssText) =>
+        /animation(?:-name)?:[^;]*\bnone\b/.test(cssText),
+      ),
+      "reduced-motion users do not receive the comments sheet animation",
     );
   });
 
@@ -1702,6 +2049,14 @@ acceptance("Video Shorts refined mobile route shell", function (needs) {
         .map((selector) => selector.trim())
         .includes(
           ".video-shorts-comments-sheet .video-shorts-comments-surface__list",
+        ),
+    );
+    const commentsOpenItemRules = ruleTextsFor((selectorText) =>
+      selectorText
+        .split(",")
+        .map((selector) => selector.trim())
+        .includes(
+          '.video-shorts-feed__viewport[data-comments-open="true"][data-comments-layout="mobile"] .video-shorts-feed__item[aria-current="true"]',
         ),
     );
     const customReplyDialogRules = ruleTextsFor((selectorText) =>
@@ -1790,6 +2145,24 @@ acceptance("Video Shorts refined mobile route shell", function (needs) {
       "mobile sheet fallback height follows the route height locked before keyboard focus",
     );
     assert.true(
+      sheetShellRules.some(
+        (cssText) =>
+          cssText.includes("isolation: isolate") &&
+          /transform:\s*translateZ\(0(?:px)?\)/.test(cssText) &&
+          cssText.includes("backface-visibility: hidden"),
+      ),
+      "mobile comments sheet is isolated into a stable paint layer during keyboard viewport changes",
+    );
+    assert.true(
+      sheetContainerRules.some(
+        (cssText) =>
+          cssText.includes("contain: layout paint") &&
+          /transform:\s*translateZ\(0(?:px)?\)/.test(cssText) &&
+          cssText.includes("backface-visibility: hidden"),
+      ),
+      "mobile sheet container does not force the video layer to repaint when the keyboard closes",
+    );
+    assert.true(
       sheetModalBodyRules.some((cssText) =>
         cssText.includes("overflow: hidden"),
       ),
@@ -1802,6 +2175,12 @@ acceptance("Video Shorts refined mobile route shell", function (needs) {
     assert.true(
       sheetListRules.some((cssText) => cssText.includes("overflow-y: auto")),
       "mobile comments list is the single active scroll surface",
+    );
+    assert.true(
+      commentsOpenItemRules.some((cssText) =>
+        cssText.includes("content-visibility: visible"),
+      ),
+      "mobile comments-open feed keeps the video layer paintable during keyboard viewport changes",
     );
     assert.deepEqual(
       customReplyDialogRules,

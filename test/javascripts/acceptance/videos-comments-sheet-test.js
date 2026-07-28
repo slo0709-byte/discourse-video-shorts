@@ -181,8 +181,16 @@ async function waitForStableRect(element, maxFrames = 30) {
       top: rect.top,
       width: rect.width,
     };
+    const hasActiveAnimation = element
+      .getAnimations()
+      .some(
+        (animation) =>
+          animation.playState === "pending" ||
+          animation.playState === "running"
+      );
 
     if (
+      !hasActiveAnimation &&
       previousRect &&
       currentRect.height === previousRect.height &&
       currentRect.left === previousRect.left &&
@@ -192,7 +200,7 @@ async function waitForStableRect(element, maxFrames = 30) {
       return rect;
     }
 
-    previousRect = currentRect;
+    previousRect = hasActiveAnimation ? undefined : currentRect;
   }
 
   throw new Error(`Element geometry did not stabilize within ${maxFrames} frames`);
@@ -2919,7 +2927,7 @@ acceptance("Video Shorts comments sheet", function (needs) {
     );
   });
 
-  test("edits a comment with the lightweight editor and reconciles the server response", async function (assert) {
+  test("edit cancel keeps the native comment mounted and reconciles the server response", async function (assert) {
     let updateRequests = 0;
     let updatedRaw;
 
@@ -2970,11 +2978,20 @@ acceptance("Video Shorts comments sheet", function (needs) {
     await visit("/videos");
     await click("[data-action='open-comments']");
     await revealNativePostActions(221);
+    const nativeCommentSelector =
+      '[data-video-shorts-native-comment][data-post-id="221"]';
+    const nativeComment = document.querySelector(nativeCommentSelector);
+
     await click(nativePostActionSelector(221, "edit"));
 
     const editor =
       '[data-video-shorts-edit-editor][data-post-id="221"]';
 
+    assert.strictEqual(
+      document.querySelector(nativeCommentSelector),
+      nativeComment,
+      "opening the edit form preserves the mounted native comment",
+    );
     assert
       .dom(`${editor} [data-video-shorts-edit-input]`)
       .hasValue("Fresh raw before edit");
@@ -2984,9 +3001,47 @@ acceptance("Video Shorts comments sheet", function (needs) {
       `${editor} [data-video-shorts-edit-input]`,
       "Cancelled lightweight draft",
     );
-    await click(`${editor} [data-video-shorts-edit-cancel]`);
+    const actionRail = document.querySelector(".video-shorts-action-rail");
+    const cancelButton = document.querySelector(
+      `${editor} [data-video-shorts-edit-cancel]`,
+    );
+
+    assert.true(
+      document.body.classList.contains(
+        "video-shorts-lightweight-composer-open",
+      ),
+      "the feed is locked while the lightweight edit form is open",
+    );
+
+    cancelButton.click();
+
+    assert.dom(editor).exists("the tracked edit form is pending teardown");
+    assert.true(
+      document.body.classList.contains(
+        "video-shorts-lightweight-composer-open",
+      ),
+      "edit cancel keeps the feed locked until teardown has rendered",
+    );
+
+    await settled();
 
     assert.dom(editor).doesNotExist();
+    assert.false(
+      document.body.classList.contains(
+        "video-shorts-lightweight-composer-open",
+      ),
+      "the feed unlocks after the edit form teardown is complete",
+    );
+    assert.strictEqual(
+      document.querySelector(".video-shorts-action-rail"),
+      actionRail,
+      "edit cancel preserves the mounted action rail",
+    );
+    assert.strictEqual(
+      document.querySelector(nativeCommentSelector),
+      nativeComment,
+      "edit cancel reveals the same native comment without remounting it",
+    );
     assert.strictEqual(updateRequests, 0, "cancel does not update the post");
     assert
       .dom('.video-shorts-comments-surface__comment[data-post-id="221"]')
@@ -3651,7 +3706,7 @@ acceptance("Video Shorts mobile comments sheet viewport", function (needs) {
   needs.user();
   needs.mobileView();
 
-  test("keeps the sheet stable and scrolls an inline reply above the mobile keyboard", async function (assert) {
+  test("keeps the background action rail hidden while cancelling a reply above the mobile keyboard", async function (assert) {
     class FakeVisualViewport extends EventTarget {
       height = window.innerHeight;
       offsetTop = 0;
@@ -3720,11 +3775,27 @@ acceptance("Video Shorts mobile comments sheet viewport", function (needs) {
       await click("[data-action='open-comments']");
 
       const sheet = document.querySelector(".video-shorts-comments-sheet");
+      const actionRail = document.querySelector(".video-shorts-action-rail");
+      const feedViewport = actionRail.closest(".video-shorts-feed__viewport");
       await waitUntil(
         () =>
           sheet.style.getPropertyValue(
             "--video-shorts-comments-sheet-stable-height",
           ) !== "",
+      );
+      assert
+        .dom(feedViewport)
+        .hasAttribute("data-comments-open", "true")
+        .hasAttribute("data-comments-layout", "mobile");
+      assert.strictEqual(
+        getComputedStyle(actionRail).visibility,
+        "hidden",
+        "the background action rail cannot paint through the mobile comments sheet",
+      );
+      assert.strictEqual(
+        getComputedStyle(actionRail).pointerEvents,
+        "none",
+        "the background action rail cannot receive input through the mobile comments sheet",
       );
 
       const stableTop = sheet.style.getPropertyValue(
@@ -3851,6 +3922,134 @@ acceptance("Video Shorts mobile comments sheet viewport", function (needs) {
       assert
         .dom(`${editorSelector} [data-video-shorts-reply-submit]`)
         .isVisible("publish remains reachable");
+      assert.strictEqual(
+        getComputedStyle(actionRail).visibility,
+        "hidden",
+        "the background action rail stays non-paintable while the keyboard is open",
+      );
+
+      const originalRequestAnimationFrame = window.requestAnimationFrame;
+      const originalCancelAnimationFrame = window.cancelAnimationFrame;
+      const queuedFrames = new Map();
+      let nextFrameId = 1;
+
+      window.requestAnimationFrame = (callback) => {
+        const frameId = nextFrameId++;
+        queuedFrames.set(frameId, callback);
+        return frameId;
+      };
+      window.cancelAnimationFrame = (frameId) => {
+        queuedFrames.delete(frameId);
+      };
+
+      document.activeElement.blur();
+      assert.strictEqual(
+        document.activeElement?.closest?.(
+          "[data-video-shorts-inline-editor]",
+        ),
+        null,
+        "closing the mobile keyboard can blur the editor before the viewport is restored",
+      );
+
+      const flushFrame = () => {
+        const callbacks = [...queuedFrames.values()];
+        queuedFrames.clear();
+
+        for (const callback of callbacks) {
+          callback(performance.now());
+        }
+      };
+
+      try {
+        visualViewport.height = window.innerHeight;
+        visualViewport.dispatchEvent(new Event("resize"));
+        visualViewport.dispatchEvent(new Event("scroll"));
+        flushFrame();
+
+        assert.strictEqual(
+          list.style.getPropertyValue(
+            "--video-shorts-comments-edit-keyboard-reserve",
+          ),
+          "292px",
+          "the keyboard reserve does not collapse during the closing viewport frame",
+        );
+
+        flushFrame();
+        assert.strictEqual(
+          list.style.getPropertyValue(
+            "--video-shorts-comments-edit-keyboard-reserve",
+          ),
+          "292px",
+          "the reserve remains stable until the restored viewport paints",
+        );
+
+        flushFrame();
+        assert.strictEqual(
+          list.style.getPropertyValue(
+            "--video-shorts-comments-edit-keyboard-reserve",
+          ),
+          "292px",
+          "the reserve stays mounted after the keyboard closes while the editor remains open",
+        );
+        assert.true(
+          scrollTop > initialScrollTop,
+          "closing the keyboard does not synchronously clamp the list scroll range",
+        );
+
+        textarea.focus();
+        visualViewport.height = 520;
+        visualViewport.dispatchEvent(new Event("resize"));
+        flushFrame();
+        assert.strictEqual(
+          list.style.getPropertyValue(
+            "--video-shorts-comments-edit-keyboard-reserve",
+          ),
+          "292px",
+          "the reserve can be reacquired when the keyboard opens again",
+        );
+
+        textarea.blur();
+        visualViewport.height = window.innerHeight;
+        visualViewport.dispatchEvent(new Event("resize"));
+        flushFrame();
+
+        const jitterReserves = [];
+
+        for (let frame = 1; frame <= 12; frame += 1) {
+          visualViewport.offsetTop = frame % 2 === 0 ? 0 : 2;
+          flushFrame();
+
+          if (frame < 12) {
+            jitterReserves.push(
+              list.style.getPropertyValue(
+                "--video-shorts-comments-edit-keyboard-reserve",
+              ),
+            );
+          }
+        }
+
+        visualViewport.offsetTop = 0;
+        assert.deepEqual(
+          jitterReserves,
+          Array(11).fill("292px"),
+          "subpixel viewport motion keeps the reserve until the bounded release budget ends",
+        );
+        assert.strictEqual(
+          list.style.getPropertyValue(
+            "--video-shorts-comments-edit-keyboard-reserve",
+          ),
+          "292px",
+          "a mounted editor keeps the reserve through the bounded viewport-settle budget",
+        );
+        assert.strictEqual(
+          queuedFrames.size,
+          0,
+          "viewport jitter cannot leave an unbounded release frame queued",
+        );
+      } finally {
+        window.requestAnimationFrame = originalRequestAnimationFrame;
+        window.cancelAnimationFrame = originalCancelAnimationFrame;
+      }
 
       await click(`${editorSelector} [data-video-shorts-reply-cancel]`);
       assert
@@ -3873,9 +4072,19 @@ acceptance("Video Shorts mobile comments sheet viewport", function (needs) {
         ),
         "cancel releases the body interaction lock",
       );
+      assert.strictEqual(
+        getComputedStyle(actionRail).visibility,
+        "hidden",
+        "cancel keeps the background action rail hidden while comments remain open",
+      );
 
       await click(".video-shorts-comments-sheet .modal-close");
       assert.dom(".video-shorts-comments-sheet").doesNotExist();
+      assert.strictEqual(
+        getComputedStyle(actionRail).visibility,
+        "visible",
+        "closing comments restores the action rail",
+      );
       await waitUntil(
         () =>
           visualViewport.listenerCounts.get("resize") ===
@@ -3902,7 +4111,7 @@ acceptance("Video Shorts mobile comments sheet viewport", function (needs) {
     }
   });
 
-  test("scrolls a focused lightweight edit above the mobile keyboard", async function (assert) {
+  test("keeps the background action rail hidden while cancelling an edit above the mobile keyboard", async function (assert) {
     class FakeVisualViewport extends EventTarget {
       height = window.innerHeight;
       offsetTop = 0;
@@ -3974,6 +4183,7 @@ acceptance("Video Shorts mobile comments sheet viewport", function (needs) {
       await click(nativePostActionSelector(261, "edit"));
 
       const sheet = document.querySelector(".video-shorts-comments-sheet");
+      const actionRail = document.querySelector(".video-shorts-action-rail");
       const editor = document.querySelector(
         '[data-video-shorts-edit-editor][data-post-id="261"]',
       );
@@ -4033,6 +4243,11 @@ acceptance("Video Shorts mobile comments sheet viewport", function (needs) {
 
       assert.dom(sheet).exists();
       assert.strictEqual(
+        getComputedStyle(actionRail).visibility,
+        "hidden",
+        "the background action rail stays non-paintable while editing",
+      );
+      assert.strictEqual(
         document.activeElement,
         textarea,
         "the edit textarea remains the keyboard focus target",
@@ -4068,6 +4283,25 @@ acceptance("Video Shorts mobile comments sheet viewport", function (needs) {
       await click(
         '[data-video-shorts-edit-editor][data-post-id="261"] [data-video-shorts-edit-cancel]',
       );
+      assert
+        .dom('[data-video-shorts-edit-editor][data-post-id="261"]')
+        .doesNotExist("cancel removes the edit surface before viewport restore");
+      assert.strictEqual(
+        list.style.getPropertyValue(
+          "--video-shorts-comments-edit-keyboard-reserve",
+        ),
+        "292px",
+        "cancel holds the keyboard reserve until the closing viewport settles",
+      );
+      assert.strictEqual(
+        getComputedStyle(actionRail).visibility,
+        "hidden",
+        "edit cancel keeps the background action rail hidden during keyboard close",
+      );
+
+      visualViewport.height = window.innerHeight;
+      visualViewport.dispatchEvent(new Event("resize"));
+      visualViewport.dispatchEvent(new Event("scroll"));
       await waitUntil(
         () =>
           list.style.getPropertyValue(
@@ -4078,6 +4312,11 @@ acceptance("Video Shorts mobile comments sheet viewport", function (needs) {
         list.style.getPropertyValue("padding-bottom"),
         originalInlinePaddingBottom,
         "cancel restores the comments list padding",
+      );
+      assert.strictEqual(
+        getComputedStyle(actionRail).visibility,
+        "hidden",
+        "edit cancel keeps the background action rail hidden while comments remain open",
       );
       await click(".video-shorts-comments-sheet .modal-close");
     } finally {

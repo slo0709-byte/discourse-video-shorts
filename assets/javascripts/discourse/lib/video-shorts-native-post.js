@@ -1,5 +1,7 @@
 import Post from "discourse/models/post";
 
+const postSnapshots = new WeakMap();
+
 function positiveInteger(value, label) {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new TypeError(`${label} must be a positive integer`);
@@ -28,6 +30,28 @@ function cloneObjectArray(value) {
   return value
     .filter((item) => item && typeof item === "object" && !Array.isArray(item))
     .map((item) => ({ ...item }));
+}
+
+function stableStringify(value) {
+  if (!value || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  }
+
+  const keys = Object.keys(value).sort();
+  return `{${keys
+    .map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`)
+    .join(",")}}`;
+}
+
+function postSnapshot(attributes) {
+  const snapshot = { ...attributes };
+  delete snapshot.topic;
+
+  return stableStringify(snapshot);
 }
 
 function commentId(comment) {
@@ -228,10 +252,16 @@ export function videoShortsNativePost({
       comment.deleted_post_placeholder === true ||
       comment.video_shorts_deleted_placeholder === true,
   };
+  const snapshot = postSnapshot(attributes);
   const existing = records?.get(id);
 
   if (existing) {
+    if (postSnapshots.get(existing) === snapshot) {
+      return existing;
+    }
+
     existing.setProperties(Post.munge({ ...attributes }));
+    postSnapshots.set(existing, snapshot);
     return existing;
   }
 
@@ -243,5 +273,6 @@ export function videoShortsNativePost({
   });
 
   records?.set(id, post);
+  postSnapshots.set(post, snapshot);
   return post;
 }

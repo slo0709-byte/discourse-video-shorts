@@ -1,4 +1,10 @@
-import { click, currentURL, triggerKeyEvent, visit } from "@ember/test-helpers";
+import {
+  click,
+  currentURL,
+  triggerKeyEvent,
+  visit,
+  waitUntil,
+} from "@ember/test-helpers";
 import { test } from "qunit";
 import pretender, {
   pretenderHelpers,
@@ -68,6 +74,15 @@ function directReply(id, topicId, username, cooked) {
 
 function setupPretender(callback) {
   callback(pretender, pretenderHelpers());
+}
+
+async function waitForActivePostId(postId) {
+  await waitUntil(
+    () =>
+      document
+        .querySelector(".video-shorts-feed__viewport")
+        ?.getAttribute("data-active-post-id") === String(postId),
+  );
 }
 
 acceptance("Video Shorts native comments contract", function (needs) {
@@ -142,6 +157,7 @@ acceptance("Video Shorts native comments contract", function (needs) {
     );
 
     await triggerKeyEvent(".video-shorts-feed__items", "keydown", "ArrowDown");
+    await waitForActivePostId(811);
 
     assert
       .dom(".video-shorts-feed__viewport")

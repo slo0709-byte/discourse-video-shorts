@@ -284,11 +284,19 @@ acceptance("Video Shorts native comments regression", function (needs) {
       );
       server.get("/posts/930/replies.json", () => helper.response([]));
 
-      const flatTopic = cloneJSON(topicFixtures["/t/280/1.json"]);
-      server.get("/n/-/280.json", () =>
+      const nestedTopicView = cloneJSON(topicFixtures["/t/281.json"]);
+      nestedTopicView.is_nested_view = true;
+      const nestedTopic = { ...nestedTopicView };
+      const opPost = nestedTopicView.post_stream.posts[0];
+
+      delete nestedTopic.post_stream;
+      delete nestedTopic.timeline_lookup;
+
+      server.get("/t/281.json", () => helper.response(nestedTopicView));
+      server.get("/n/local-dates/281.json", () =>
         helper.response({
-          topic: flatTopic,
-          op_post: flatTopic.post_stream.posts[0],
+          topic: nestedTopic,
+          op_post: opPost,
           roots: [],
           page: 0,
           has_more_roots: false,
@@ -314,7 +322,7 @@ acceptance("Video Shorts native comments regression", function (needs) {
         "ordinary topics do not inherit the videos route style scope",
       );
 
-    await visit("/n/-/280");
+    await visit("/t/local-dates/281");
 
     assert.dom(".nested-view").exists("the core nested route fixture renders");
     assert.dom(COMMENTS_SELECTOR).doesNotExist();

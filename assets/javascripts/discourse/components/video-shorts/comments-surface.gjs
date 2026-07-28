@@ -119,7 +119,11 @@ const CommentBranchControls = <template>
 
 const NativeCommentRow = <template>
   <li
-    class="video-shorts-comments-surface__comment video-shorts-comments-surface__comment--native"
+    class={{if
+      (@surface.isEditingComment @comment)
+      "video-shorts-comments-surface__comment video-shorts-comments-surface__comment--native video-shorts-comments-surface__comment--editing"
+      "video-shorts-comments-surface__comment video-shorts-comments-surface__comment--native"
+    }}
     data-post-id={{@comment.post_id}}
     data-post-number={{@comment.post_number}}
   >
@@ -185,7 +189,17 @@ const NativeCommentRow = <template>
           </button>
         </div>
       </form>
-    {{else}}
+    {{/if}}
+
+    <div
+      class={{if
+        (@surface.isEditingComment @comment)
+        "video-shorts-comments-surface__native-comment-shell video-shorts-comments-surface__native-comment-shell--editing"
+        "video-shorts-comments-surface__native-comment-shell"
+      }}
+      aria-hidden={{if (@surface.isEditingComment @comment) "true"}}
+      inert={{@surface.isEditingComment @comment}}
+    >
       {{#let (@surface.nativePostFor @comment) as |post|}}
         {{#if post}}
           <NativeComment
@@ -205,8 +219,9 @@ const NativeCommentRow = <template>
           </NativeComment>
         {{/if}}
       {{/let}}
+    </div>
 
-      {{#if (@surface.isReplyingToComment @comment)}}
+    {{#if (@surface.isReplyingToComment @comment)}}
         <form
           class="video-shorts-comments-surface__reply-editor video-shorts-comments-surface__edit-editor video-shorts-comments-surface__inline-reply-editor"
           data-video-shorts-inline-editor
@@ -254,7 +269,6 @@ const NativeCommentRow = <template>
             </button>
           </div>
         </form>
-      {{/if}}
     {{/if}}
   </li>
 </template>;
@@ -572,6 +586,12 @@ export default class VideoShortsCommentsSurface extends Component {
     }
   };
 
+  primeNativePosts = (comments = []) => {
+    for (const comment of comments) {
+      this.nativePostFor(comment);
+    }
+  };
+
   applyNativeComposerEdit = (serverPost) => {
     if (isDestroying(this) || isDestroyed(this)) {
       return;
@@ -721,6 +741,7 @@ export default class VideoShortsCommentsSurface extends Component {
       }
 
       if (append) {
+        this.primeNativePosts(deduped);
         this.comments = [...this.comments, ...deduped];
       } else {
         const commentsNow = new Map(
@@ -741,8 +762,10 @@ export default class VideoShortsCommentsSurface extends Component {
         const realtimeAdditions = [...changedDuringRequest]
           .filter(([key]) => !responseKeys.has(key))
           .map(([, comment]) => comment);
+        const nextComments = [...realtimeAdditions, ...responseComments];
 
-        this.comments = [...realtimeAdditions, ...responseComments];
+        this.primeNativePosts(nextComments);
+        this.comments = nextComments;
       }
       this.hasDeletedPlaceholderContext =
         this.hasDeletedPlaceholderContext || this.comments.some(isDeletedPlaceholder);
@@ -1244,11 +1267,9 @@ export default class VideoShortsCommentsSurface extends Component {
       });
     };
 
-    this.comments = replaceInTree(this.comments);
+    const comments = replaceInTree(this.comments);
 
     if (replaced) {
-      this.childRepliesByPostId = nextChildRepliesByPostId;
-
       videoShortsNativePost({
         comment: { ...updatedComment, reply_count: 0 },
         item: this.item,
@@ -1256,7 +1277,10 @@ export default class VideoShortsCommentsSurface extends Component {
         store: this.store,
         records: this.nativePostRecords,
       });
+      this.childRepliesByPostId = nextChildRepliesByPostId;
     }
+
+    this.comments = comments;
 
     return replaced;
   }
@@ -1271,6 +1295,7 @@ export default class VideoShortsCommentsSurface extends Component {
     let countDelta = 0;
     let parentPostId = null;
     let keptPlaceholder = false;
+    let deletedPlaceholder = null;
 
     const removeFromTree = (comments, parentKey = null) => {
       let removed = false;
@@ -1305,7 +1330,7 @@ export default class VideoShortsCommentsSurface extends Component {
           nextChildRepliesByPostId[targetKey] = children;
           keptPlaceholder = true;
 
-          nextComments.push({
+          deletedPlaceholder = {
             ...comment,
             cooked: `<p>${i18n("video_shorts.comments.deleted_placeholder")}</p>`,
             raw: "",
@@ -1318,7 +1343,8 @@ export default class VideoShortsCommentsSurface extends Component {
               children.length
             ),
             replies: children,
-          });
+          };
+          nextComments.push(deletedPlaceholder);
           continue;
         }
 
@@ -1358,6 +1384,10 @@ export default class VideoShortsCommentsSurface extends Component {
     };
 
     const result = removeFromTree(this.comments);
+
+    if (deletedPlaceholder) {
+      this.nativePostFor(deletedPlaceholder);
+    }
 
     this.comments = result.comments;
 
@@ -1482,15 +1512,18 @@ export default class VideoShortsCommentsSurface extends Component {
       };
     };
 
-    this.comments = this.comments.map((comment) => appendToTarget(comment));
+    const comments = this.comments.map((comment) => appendToTarget(comment));
 
     if (appended) {
+      this.nativePostFor(childReply);
       this.childRepliesByPostId = nextChildRepliesByPostId;
       this.expandedReplyPostIds = {
         ...this.expandedReplyPostIds,
         [parentKey]: true,
       };
     }
+
+    this.comments = comments;
 
     return appended;
   }
@@ -1500,6 +1533,7 @@ export default class VideoShortsCommentsSurface extends Component {
       return;
     }
 
+    this.nativePostFor(comment);
     this.comments = [comment, ...this.comments];
   }
 
@@ -1517,6 +1551,20 @@ export default class VideoShortsCommentsSurface extends Component {
     this.editError = null;
     this.editLoading = false;
     this.editSubmitting = false;
+    scheduleOnce("afterRender", this, this.releaseReplyFeedLock);
+  }
+
+  releaseReplyFeedLock() {
+    if (
+      isDestroying(this) ||
+      isDestroyed(this) ||
+      this.topLevelReplyOpen ||
+      this.commentReplyPostId ||
+      this.editPostId
+    ) {
+      return;
+    }
+
     document.body.classList.remove("video-shorts-lightweight-composer-open");
   }
 

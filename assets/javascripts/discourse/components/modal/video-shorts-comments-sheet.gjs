@@ -9,6 +9,9 @@ import { i18n } from "discourse-i18n";
 import VideoShortsCommentsSurface from "discourse/plugins/discourse-video-shorts/discourse/components/video-shorts/comments-surface";
 
 const MAX_SHEET_RECT_RETRY_FRAMES = 12;
+const MAX_KEYBOARD_RESERVE_RELEASE_FRAMES = 12;
+const LIGHTWEIGHT_EDITOR_SELECTOR =
+  "[data-video-shorts-inline-editor], [data-video-shorts-edit-editor], [data-video-shorts-reply-editor]";
 
 export default class VideoShortsCommentsSheet extends Component {
   @service site;
@@ -162,8 +165,23 @@ export default class VideoShortsCommentsSheet extends Component {
     let inlineEditorList = null;
     let inlineEditorListBasePaddingBottom = 0;
     let inlineEditorListOriginalPaddingBottom = "";
+    let inlineEditorKeyboardReserve = 0;
+    let keyboardReserveReleaseFrame = null;
+    let keyboardReserveReleaseAttempts = 0;
+    let keyboardReserveStableFrames = 0;
+    let keyboardReserveViewportBottom = null;
+    let editorRemovalObserver = null;
 
     const clearInlineEditorKeyboardReserve = () => {
+      if (keyboardReserveReleaseFrame !== null) {
+        cancelAnimationFrame(keyboardReserveReleaseFrame);
+        keyboardReserveReleaseFrame = null;
+      }
+
+      keyboardReserveReleaseAttempts = 0;
+      keyboardReserveStableFrames = 0;
+      keyboardReserveViewportBottom = null;
+
       if (!inlineEditorList) {
         return;
       }
@@ -183,6 +201,88 @@ export default class VideoShortsCommentsSheet extends Component {
       inlineEditorList = null;
       inlineEditorListBasePaddingBottom = 0;
       inlineEditorListOriginalPaddingBottom = "";
+      inlineEditorKeyboardReserve = 0;
+    };
+
+    const currentViewportBottom = () =>
+      visualViewport
+        ? visualViewport.offsetTop + visualViewport.height
+        : window.innerHeight;
+
+    const applyInlineEditorKeyboardReserve = (commentsList, reserve) => {
+      commentsList.style.setProperty(
+        "--video-shorts-comments-edit-keyboard-reserve",
+        `${reserve}px`
+      );
+      commentsList.style.setProperty(
+        "padding-bottom",
+        `${inlineEditorListBasePaddingBottom + reserve}px`
+      );
+      inlineEditorKeyboardReserve = reserve;
+    };
+
+    const releaseInlineEditorKeyboardReserve = (commentsList) => {
+      if (keyboardReserveReleaseFrame !== null) {
+        return;
+      }
+
+      keyboardReserveReleaseAttempts = 0;
+      keyboardReserveStableFrames = 0;
+      keyboardReserveViewportBottom = currentViewportBottom();
+
+      const releaseAfterViewportSettles = () => {
+        keyboardReserveReleaseFrame = null;
+
+        if (
+          inlineEditorList !== commentsList ||
+          !surface.contains(commentsList)
+        ) {
+          clearInlineEditorKeyboardReserve();
+          return;
+        }
+
+        keyboardReserveReleaseAttempts += 1;
+
+        const nextViewportBottom = currentViewportBottom();
+
+        if (
+          Math.abs(nextViewportBottom - keyboardReserveViewportBottom) < 1
+        ) {
+          keyboardReserveStableFrames += 1;
+        } else {
+          keyboardReserveStableFrames = 0;
+        }
+
+        keyboardReserveViewportBottom = nextViewportBottom;
+
+        if (
+          keyboardReserveStableFrames < 2 &&
+          keyboardReserveReleaseAttempts <
+            MAX_KEYBOARD_RESERVE_RELEASE_FRAMES
+        ) {
+          keyboardReserveReleaseFrame = requestAnimationFrame(
+            releaseAfterViewportSettles
+          );
+          return;
+        }
+
+        const settledListRect = commentsList.getBoundingClientRect();
+        const settledVisibleBottom = Math.min(
+          settledListRect.bottom,
+          nextViewportBottom
+        );
+
+        if (
+          settledListRect.bottom - settledVisibleBottom < 1 &&
+          !surface.querySelector(LIGHTWEIGHT_EDITOR_SELECTOR)
+        ) {
+          clearInlineEditorKeyboardReserve();
+        }
+      };
+
+      keyboardReserveReleaseFrame = requestAnimationFrame(
+        releaseAfterViewportSettles
+      );
     };
 
     const keepFocusedInlineEditorVisible = () => {
@@ -190,9 +290,7 @@ export default class VideoShortsCommentsSheet extends Component {
         ".video-shorts-comments-surface__list"
       );
       const activeElement = document.activeElement;
-      const editor = activeElement?.closest?.(
-        "[data-video-shorts-inline-editor]"
-      );
+      const editor = activeElement?.closest?.(LIGHTWEIGHT_EDITOR_SELECTOR);
 
       if (!commentsList) {
         clearInlineEditorKeyboardReserve();
@@ -200,15 +298,20 @@ export default class VideoShortsCommentsSheet extends Component {
       }
 
       if (!editor || !surface.contains(editor)) {
-        clearInlineEditorKeyboardReserve();
+        if (
+          inlineEditorList === commentsList &&
+          inlineEditorKeyboardReserve > 0
+        ) {
+          releaseInlineEditorKeyboardReserve(commentsList);
+        } else {
+          clearInlineEditorKeyboardReserve();
+        }
         return;
       }
 
       const listRect = commentsList.getBoundingClientRect();
       const viewportTop = visualViewport?.offsetTop ?? 0;
-      const viewportBottom = visualViewport
-        ? visualViewport.offsetTop + visualViewport.height
-        : window.innerHeight;
+      const viewportBottom = currentViewportBottom();
       const visibleTop = Math.max(listRect.top, viewportTop);
       const visibleBottom = Math.min(listRect.bottom, viewportBottom);
 
@@ -233,14 +336,19 @@ export default class VideoShortsCommentsSheet extends Component {
           Number.parseFloat(getComputedStyle(commentsList).paddingBottom) || 0;
       }
 
-      commentsList.style.setProperty(
-        "--video-shorts-comments-edit-keyboard-reserve",
-        `${keyboardReserve}px`
-      );
-      commentsList.style.setProperty(
-        "padding-bottom",
-        `${inlineEditorListBasePaddingBottom + keyboardReserve}px`
-      );
+      if (keyboardReserve > 0 || inlineEditorKeyboardReserve === 0) {
+        if (keyboardReserveReleaseFrame !== null) {
+          cancelAnimationFrame(keyboardReserveReleaseFrame);
+          keyboardReserveReleaseFrame = null;
+        }
+
+        keyboardReserveReleaseAttempts = 0;
+        keyboardReserveStableFrames = 0;
+        keyboardReserveViewportBottom = null;
+        applyInlineEditorKeyboardReserve(commentsList, keyboardReserve);
+      } else {
+        releaseInlineEditorKeyboardReserve(commentsList);
+      }
 
       const editorRect = editor.getBoundingClientRect();
 
@@ -347,10 +455,35 @@ export default class VideoShortsCommentsSheet extends Component {
     if (!lockSheetRect()) {
       restartLockSheetRect();
     }
+
+    const releaseKeyboardReserve = () => {
+      const commentsList = surface.querySelector(
+        ".video-shorts-comments-surface__list"
+      );
+
+      if (
+        commentsList &&
+        inlineEditorList === commentsList &&
+        inlineEditorKeyboardReserve > 0
+      ) {
+        releaseInlineEditorKeyboardReserve(commentsList);
+      } else if (!surface.querySelector(LIGHTWEIGHT_EDITOR_SELECTOR)) {
+        clearInlineEditorKeyboardReserve();
+      }
+    };
+
+    editorRemovalObserver = new MutationObserver(() => {
+      if (!surface.querySelector(LIGHTWEIGHT_EDITOR_SELECTOR)) {
+        releaseKeyboardReserve();
+      }
+    });
+
     window.addEventListener("resize", restartLockSheetRect);
     visualViewport?.addEventListener("resize", restartLockSheetRect);
     visualViewport?.addEventListener("scroll", restartLockSheetRect);
     sheet.addEventListener("focusin", restartLockSheetRect);
+    sheet.addEventListener("focusout", releaseKeyboardReserve, true);
+    editorRemovalObserver.observe(surface, { childList: true, subtree: true });
 
     return () => {
       if (rafId !== null) {
@@ -361,6 +494,8 @@ export default class VideoShortsCommentsSheet extends Component {
       visualViewport?.removeEventListener("resize", restartLockSheetRect);
       visualViewport?.removeEventListener("scroll", restartLockSheetRect);
       sheet.removeEventListener("focusin", restartLockSheetRect);
+      sheet.removeEventListener("focusout", releaseKeyboardReserve, true);
+      editorRemovalObserver?.disconnect();
       sheet.style.removeProperty("--video-shorts-comments-sheet-stable-top");
       sheet.style.removeProperty("--video-shorts-comments-sheet-stable-height");
       sheet.style.removeProperty("--video-shorts-comments-sheet-captured-top");

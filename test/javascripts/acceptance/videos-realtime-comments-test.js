@@ -575,7 +575,12 @@ acceptance("Video Shorts realtime comment content", function (needs) {
 
   test("network recovery reloads only an open comments surface", async function (assert) {
     let directRepliesRequests = 0;
-    let replies = [];
+    let replies = [
+      post(751, 2, "<p>Recovered before offline</p>", {
+        can_edit: false,
+        version: 1,
+      }),
+    ];
 
     setupServer((server, helper) => {
       server.get("/videos.json", () =>
@@ -598,11 +603,27 @@ acceptance("Video Shorts realtime comment content", function (needs) {
 
     await click("[data-action='open-comments']");
     assert.strictEqual(directRepliesRequests, 1, "opening performs the first request");
-    replies = [post(751, 2, "<p>Recovered while offline</p>")];
+    assert
+      .dom(row(751))
+      .exists({ count: 1 })
+      .includesText("Recovered before offline");
+
+    replies = [
+      post(751, 2, "<p>Recovered while offline</p>", {
+        can_edit: true,
+        version: 2,
+      }),
+    ];
     window.dispatchEvent(new Event("online"));
     await settled();
     assert.strictEqual(directRepliesRequests, 2, "reconnect refreshes exactly once");
-    assert.dom(row(751)).exists({ count: 1 }).includesText("Recovered while offline");
+    assert
+      .dom(row(751))
+      .exists({ count: 1 })
+      .includesText(
+        "Recovered while offline",
+        "the cached native post refreshes before the reconnected tree renders"
+      );
 
     await closeComments();
     window.dispatchEvent(new Event("online"));

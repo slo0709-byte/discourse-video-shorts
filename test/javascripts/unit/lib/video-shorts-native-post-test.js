@@ -413,6 +413,79 @@ module("Unit | Lib | video shorts native post", function (hooks) {
     assert.deepEqual(revisedComment, revisedSnapshot);
   });
 
+  test("skips tracked writes for semantically unchanged cached records", function (assert) {
+    const records = new Map();
+    const initialComment = comment({
+      id: 808,
+      post_id: 808,
+      post_number: 8,
+    });
+    const first = videoShortsNativePost({
+      comment: initialComment,
+      item: feedItem(),
+      topic: this.topic,
+      store: this.store,
+      records,
+    });
+    const originalSetProperties = first.setProperties;
+    let setPropertiesCalls = 0;
+
+    first.setProperties = function (properties) {
+      setPropertiesCalls += 1;
+      return originalSetProperties.call(this, properties);
+    };
+
+    const unchanged = videoShortsNativePost({
+      comment: comment({
+        id: 808,
+        post_id: 808,
+        post_number: 8,
+        reply_to_user: {
+          username: "parent-author",
+          id: 44,
+          avatar_template:
+            "/user_avatar/localhost/parent-author/{size}/1_2.png",
+          name: "Parent Author",
+        },
+      }),
+      item: feedItem(),
+      topic: this.topic,
+      store: this.store,
+      records,
+    });
+
+    assert.strictEqual(unchanged, first, "the cached Post is reused");
+    assert.strictEqual(
+      setPropertiesCalls,
+      0,
+      "unchanged payloads do not write tracked Post fields"
+    );
+
+    const changed = videoShortsNativePost({
+      comment: comment({
+        id: 808,
+        post_id: 808,
+        post_number: 8,
+        cooked: "<p>Changed on the server</p>",
+        raw: "Changed on the server",
+        version: 3,
+      }),
+      item: feedItem(),
+      topic: this.topic,
+      store: this.store,
+      records,
+    });
+
+    assert.strictEqual(changed, first, "changed payloads keep record identity");
+    assert.strictEqual(
+      setPropertiesCalls,
+      1,
+      "changed payloads refresh the cached Post once"
+    );
+    assert.strictEqual(changed.cooked, "<p>Changed on the server</p>");
+    assert.strictEqual(changed.version, 3);
+  });
+
   test("does not mutate a canonical store Post with the same id", function (assert) {
     flushMap();
     const canonical = this.store.createRecord("post", {

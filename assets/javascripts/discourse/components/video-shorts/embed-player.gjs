@@ -7,22 +7,28 @@ export default class VideoShortsEmbedPlayer extends Component {
   }
 
   <template>
-    <div class="video-shorts-embed-player">
-      {{#if this.iframe}}
-        <iframe
-          class="video-shorts-embed-player__iframe"
-          src={{this.iframe.src}}
-          title={{this.iframe.title}}
-          loading="lazy"
-          allow={{this.iframe.allow}}
-          sandbox={{this.iframe.sandbox}}
-          referrerpolicy={{this.iframe.referrerPolicy}}
-        ></iframe>
-      {{else}}
-        <a class="video-shorts-embed-player__fallback" href={{@item.post_url}}>
-          Open topic
-        </a>
-      {{/if}}
-    </div>
+    {{#let this.iframe as |embedInfo|}}
+      <div
+        class="video-shorts-embed-player"
+        data-video-shorts-provider={{embedInfo.provider}}
+      >
+        {{#if embedInfo}}
+          <iframe
+            class="video-shorts-embed-player__iframe"
+            data-video-shorts-provider={{embedInfo.provider}}
+            src={{embedInfo.src}}
+            title={{embedInfo.title}}
+            loading="lazy"
+            allow={{embedInfo.allow}}
+            sandbox={{embedInfo.sandbox}}
+            referrerpolicy={{embedInfo.referrerPolicy}}
+          ></iframe>
+        {{else}}
+          <a class="video-shorts-embed-player__fallback" href={{@item.post_url}}>
+            Open topic
+          </a>
+        {{/if}}
+      </div>
+    {{/let}}
   </template>
 }

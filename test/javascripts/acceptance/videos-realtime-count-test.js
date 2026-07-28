@@ -116,6 +116,15 @@ function nativePostActionSelector(postId, action) {
   return `${nativePostSelector(postId)} .post-action-menu__${action}, [data-content] .post-action-menu__${action}`;
 }
 
+async function waitForActivePostId(postId) {
+  await waitUntil(
+    () =>
+      document
+        .querySelector(".video-shorts-feed__viewport")
+        ?.getAttribute("data-active-post-id") === String(postId),
+  );
+}
+
 async function revealNativePostActions(postId) {
   const moreActions = `${nativePostSelector(postId)} .show-more-actions`;
 
@@ -364,6 +373,7 @@ acceptance("Video shorts | realtime authoritative count", function (needs) {
           `delete request did not start: requests=${deleteRequests}, dialog=${Boolean(
             document.querySelector(".dialog-footer"),
           )}, responseFactory=${Boolean(deleteResponse)}; ${error.message}`,
+          { cause: error },
         );
       }
 
@@ -387,6 +397,7 @@ acceptance("Video shorts | realtime authoritative count", function (needs) {
           )}, callbacks=${callbacks.length}, rail=${document
             .querySelector(railCount(619))
             ?.textContent.trim()}; ${error.message}`,
+          { cause: error },
         );
       }
       assert.deepEqual(countRequests, ["619"], "one authority request wins");
@@ -502,7 +513,16 @@ acceptance("Video shorts | realtime authoritative count", function (needs) {
         "keydown",
         "ArrowDown",
       );
+      await waitForActivePostId(616);
+      await waitUntil(() =>
+        subscriptions.some(([channel]) => channel === "/topic/616"),
+      );
       await visit("/latest");
+      await waitUntil(
+        () =>
+          unsubscriptions.length === subscriptions.length &&
+          subscriptions.length >= 2,
+      );
 
       assert.deepEqual(
         [...new Set(subscriptions.map(([channel]) => channel))],

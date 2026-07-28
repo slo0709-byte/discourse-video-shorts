@@ -1,7 +1,9 @@
 import Component from "@glimmer/component";
 import { tracked } from "@glimmer/tracking";
+import { isDestroyed, isDestroying } from "@ember/destroyable";
 import { on } from "@ember/modifier";
 import { action } from "@ember/object";
+import { scheduleOnce } from "@ember/runloop";
 import { service } from "@ember/service";
 import { modifier } from "ember-modifier";
 import { ajax } from "discourse/lib/ajax";
@@ -21,20 +23,31 @@ import {
 import { videoShortsAccentStyle } from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-visual-accent";
 import VideoShortsItem from "./item";
 
+const NEAR_END_THRESHOLD = 5;
+const SCROLL_SETTLE_DELAY = 120;
+
 export default class VideoShortsFeed extends Component {
   @service composer;
   @service messageBus;
   @service modal;
 
   @tracked activeIndex = 0;
+  @tracked playbackIndex = 0;
   @tracked commentsOpen = false;
   @tracked selectedCommentsItem = null;
   @tracked isDesktopLayout = false;
   @tracked mediaMuted = true;
   @tracked replyCountOverrides = {};
-  initialActivePostIdApplied = false;
+  lastAppliedInitialActivePostId = null;
   restoringInitialActivePostId = false;
   commentCountSync = null;
+  pendingActiveIndex = null;
+  scrollSettleTimer = null;
+  visibleItemRatios = new Map();
+  lastNearEndIndex = null;
+  feedItemsElement = null;
+  centerFrame = null;
+  focusFrame = null;
 
   trackLayoutMode = modifier(() => {
     const query = window.matchMedia("(min-width: 1024px)");
@@ -59,19 +72,19 @@ export default class VideoShortsFeed extends Component {
 
       body.style.setProperty(
         "--video-shorts-comments-panel-left",
-        `${Math.round(rect.left)}px`,
+        `${Math.round(rect.left)}px`
       );
       body.style.setProperty(
         "--video-shorts-comments-panel-top",
-        `${Math.round(rect.top)}px`,
+        `${Math.round(rect.top)}px`
       );
       body.style.setProperty(
         "--video-shorts-comments-panel-width",
-        `${Math.round(rect.width)}px`,
+        `${Math.round(rect.width)}px`
       );
       body.style.setProperty(
         "--video-shorts-comments-panel-height",
-        `${Math.round(rect.height)}px`,
+        `${Math.round(rect.height)}px`
       );
     };
     const scheduleUpdate = () => {
@@ -160,16 +173,15 @@ export default class VideoShortsFeed extends Component {
     };
   });
 
-  applyInitialActivePostId = modifier(() => {
-    if (this.initialActivePostIdApplied) {
+  applyInitialActivePostId = modifier((_element, [postId]) => {
+    const postIdKey = postId ? String(postId) : "";
+
+    if (postIdKey === this.lastAppliedInitialActivePostId) {
       return;
     }
 
-    this.initialActivePostIdApplied = true;
-    this.setActiveIndex(this.indexForPostId(this.args.initialActivePostId), {
-      center: true,
-      syncUrl: true,
-    });
+    this.lastAppliedInitialActivePostId = postIdKey;
+    scheduleOnce("afterRender", this, this.applyRequestedActivePostId, postId);
   });
 
   trackRealtimeCommentCount = modifier(
@@ -211,29 +223,69 @@ export default class VideoShortsFeed extends Component {
     const root = element.closest(".video-shorts-feed__items");
     const observer = new IntersectionObserver(
       ([entry]) => {
-        if (entry.isIntersecting && entry.intersectionRatio >= 0.6) {
-          if (this.restoringInitialActivePostId && index !== this.activeIndex) {
-            return;
-          }
-
-          this.restoringInitialActivePostId = false;
-          this.setActiveIndex(index);
+        if (this.restoringInitialActivePostId && index !== this.activeIndex) {
+          return;
         }
+
+        if (entry.isIntersecting && entry.intersectionRatio >= 0.6) {
+          this.visibleItemRatios.set(index, entry.intersectionRatio);
+        } else {
+          this.visibleItemRatios.delete(index);
+        }
+
+        this.pendingActiveIndex = this.mostVisibleItemIndex();
+        if (this.pendingActiveIndex !== null) {
+          this.setPlaybackIndex(this.pendingActiveIndex);
+        }
+        this.schedulePendingActiveCommit();
       },
       { root, threshold: [0.6] }
     );
 
     observer.observe(element);
 
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      this.visibleItemRatios.delete(index);
+    };
   });
 
-  centerOnInsert = modifier(() => {
-    requestAnimationFrame(() => this.centerActiveItem());
+  trackScrollSettling = modifier((element) => {
+    const commit = () => this.commitPendingActiveIndex();
+    const schedule = () => this.schedulePendingActiveCommit();
+
+    element.addEventListener("scroll", schedule, { passive: true });
+    element.addEventListener("scrollend", commit);
+
+    return () => {
+      element.removeEventListener("scroll", schedule);
+      element.removeEventListener("scrollend", commit);
+      this.clearScrollSettleTimer();
+      this.visibleItemRatios.clear();
+      this.pendingActiveIndex = null;
+    };
+  });
+
+  centerOnInsert = modifier((element) => {
+    this.feedItemsElement = element;
+    this.centerActiveItem();
+
+    return () => {
+      this.clearCenterFrame();
+      this.clearFocusFrame();
+
+      if (this.feedItemsElement === element) {
+        this.feedItemsElement = null;
+      }
+    };
   });
 
   isWithinPreloadWindow = (index) => {
-    return Math.abs(index - this.activeIndex) <= 1;
+    return (
+      index === this.playbackIndex ||
+      (this.allowsAdjacentPreload &&
+        Math.abs(index - this.playbackIndex) <= 1)
+    );
   };
 
   replyCountFor = (item) => {
@@ -262,8 +314,40 @@ export default class VideoShortsFeed extends Component {
   constructor(owner, args) {
     super(owner, args);
     this.activeIndex = this.indexForPostId(args.initialActivePostId);
-    this.restoringInitialActivePostId =
-      Boolean(args.initialActivePostId) && this.activeIndex > 0;
+    this.playbackIndex = this.activeIndex;
+    this.restoringInitialActivePostId = Boolean(args.initialActivePostId);
+  }
+
+  get allowsAdjacentPreload() {
+    const connection = navigator.connection;
+
+    return (
+      !connection?.saveData &&
+      connection?.effectiveType !== "slow-2g" &&
+      connection?.effectiveType !== "2g"
+    );
+  }
+
+  applyRequestedActivePostId(postId) {
+    const postIdKey = postId ? String(postId) : "";
+
+    if (
+      isDestroying(this) ||
+      isDestroyed(this) ||
+      postIdKey !== this.lastAppliedInitialActivePostId
+    ) {
+      return;
+    }
+
+    const nextIndex = this.indexForPostId(postId);
+    this.restoringInitialActivePostId = Boolean(postId);
+    this.clearScrollSettleTimer();
+    this.visibleItemRatios.clear();
+    this.pendingActiveIndex = null;
+    this.setActiveIndex(nextIndex, {
+      center: true,
+      syncUrl: true,
+    });
   }
 
   indexForPostId(postId) {
@@ -288,6 +372,92 @@ export default class VideoShortsFeed extends Component {
     }
   }
 
+  mostVisibleItemIndex() {
+    let mostVisibleIndex = null;
+    let highestRatio = 0;
+
+    for (const [index, ratio] of this.visibleItemRatios) {
+      if (ratio > highestRatio) {
+        mostVisibleIndex = index;
+        highestRatio = ratio;
+      }
+    }
+
+    return mostVisibleIndex;
+  }
+
+  clearScrollSettleTimer() {
+    if (this.scrollSettleTimer !== null) {
+      clearTimeout(this.scrollSettleTimer);
+      this.scrollSettleTimer = null;
+    }
+  }
+
+  clearCenterFrame() {
+    if (this.centerFrame !== null) {
+      cancelAnimationFrame(this.centerFrame);
+      this.centerFrame = null;
+    }
+  }
+
+  clearFocusFrame() {
+    if (this.focusFrame !== null) {
+      cancelAnimationFrame(this.focusFrame);
+      this.focusFrame = null;
+    }
+  }
+
+  schedulePendingActiveCommit() {
+    if (this.pendingActiveIndex === null) {
+      return;
+    }
+
+    this.clearScrollSettleTimer();
+    this.scrollSettleTimer = setTimeout(
+      () => this.commitPendingActiveIndex(),
+      SCROLL_SETTLE_DELAY
+    );
+  }
+
+  commitPendingActiveIndex() {
+    if (this.pendingActiveIndex === null) {
+      return;
+    }
+
+    const nextIndex = this.pendingActiveIndex;
+
+    this.pendingActiveIndex = null;
+    this.clearScrollSettleTimer();
+    this.setActiveIndex(nextIndex);
+    this.restoringInitialActivePostId = false;
+  }
+
+  requestNextPageNearEnd(index) {
+    const itemCount = this.args.items?.length || 0;
+    const remainingItems = itemCount - index - 1;
+
+    if (
+      index === 0 ||
+      remainingItems > NEAR_END_THRESHOLD ||
+      this.lastNearEndIndex === index
+    ) {
+      return;
+    }
+
+    this.lastNearEndIndex = index;
+    this.args.onNearEnd?.();
+  }
+
+  setPlaybackIndex(index) {
+    const itemCount = this.args.items?.length || 0;
+
+    if (itemCount === 0) {
+      return;
+    }
+
+    this.playbackIndex = Math.max(0, Math.min(itemCount - 1, index));
+  }
+
   setActiveIndex(index, { center = false, syncUrl = true } = {}) {
     const itemCount = this.args.items?.length || 0;
 
@@ -296,11 +466,20 @@ export default class VideoShortsFeed extends Component {
     }
 
     const nextIndex = Math.max(0, Math.min(itemCount - 1, index));
+    const activeIndexChanged = nextIndex !== this.activeIndex;
 
-    this.activeIndex = nextIndex;
+    this.setPlaybackIndex(nextIndex);
 
-    if (syncUrl) {
+    if (activeIndexChanged) {
+      this.activeIndex = nextIndex;
+    }
+
+    if (syncUrl && activeIndexChanged) {
       this.notifyActivePostId();
+    }
+
+    if (activeIndexChanged) {
+      this.requestNextPageNearEnd(nextIndex);
     }
 
     if (center) {
@@ -314,6 +493,14 @@ export default class VideoShortsFeed extends Component {
 
   get activeItem() {
     return this.args.items?.[this.activeIndex] || null;
+  }
+
+  get playbackItemSelector() {
+    return `[data-video-shorts-index="${this.playbackIndex}"]`;
+  }
+
+  get playbackItem() {
+    return this.args.items?.[this.playbackIndex] || null;
   }
 
   get commentsSurfaceItem() {
@@ -398,14 +585,23 @@ export default class VideoShortsFeed extends Component {
   }
 
   activeVideo() {
-    return document.querySelector(`${this.activeItemSelector} video`);
+    return this.feedItemsElement?.querySelector(
+      `${this.playbackItemSelector} video`
+    );
   }
 
   @action
   centerActiveItem() {
-    requestAnimationFrame(() => {
-      const activeItem = document.querySelector(this.activeItemSelector);
-      const scroller = activeItem?.closest(".video-shorts-feed__items");
+    this.clearCenterFrame();
+    this.centerFrame = requestAnimationFrame(() => {
+      this.centerFrame = null;
+
+      if (isDestroying(this) || isDestroyed(this)) {
+        return;
+      }
+
+      const scroller = this.feedItemsElement;
+      const activeItem = scroller?.querySelector(this.activeItemSelector);
 
       if (activeItem && scroller) {
         scroller.scrollTo({
@@ -428,19 +624,28 @@ export default class VideoShortsFeed extends Component {
   }
 
   moveActiveIndex(direction) {
+    this.restoringInitialActivePostId = false;
+    const navigationIndex = this.pendingActiveIndex ?? this.activeIndex;
     const nextIndex = Math.max(
       0,
-      Math.min((this.args.items?.length || 1) - 1, this.activeIndex + direction)
+      Math.min((this.args.items?.length || 1) - 1, navigationIndex + direction)
     );
 
-    this.setActiveIndex(nextIndex, { syncUrl: true });
-    document
-      .querySelector(`[data-video-shorts-index="${nextIndex}"]`)
+    if (nextIndex === navigationIndex) {
+      return;
+    }
+
+    this.pendingActiveIndex = nextIndex;
+    this.setPlaybackIndex(nextIndex);
+    this.feedItemsElement
+      ?.querySelector(`[data-video-shorts-index="${nextIndex}"]`)
       ?.scrollIntoView({ block: "center" });
+    this.schedulePendingActiveCommit();
   }
 
   @action
   openComments({ item }) {
+    this.clearFocusFrame();
     const itemIndex = this.indexForPostId(item?.post_id);
 
     if (
@@ -462,7 +667,8 @@ export default class VideoShortsFeed extends Component {
       model: {
         item,
         replyCount: () => this.replyCountFor(item),
-        onCommentMutation: (mutation) => this.handleCommentMutation(item, mutation),
+        onCommentMutation: (mutation) =>
+          this.handleCommentMutation(item, mutation),
         onClose: this.closeComments,
       },
     });
@@ -473,11 +679,17 @@ export default class VideoShortsFeed extends Component {
     this.commentsOpen = false;
     this.selectedCommentsItem = null;
 
-    requestAnimationFrame(() => {
-      if (!this.commentsOpen) {
-        document
-          .querySelector(".video-shorts-feed__items")
-          ?.focus({ preventScroll: true });
+    this.clearFocusFrame();
+    this.focusFrame = requestAnimationFrame(() => {
+      this.focusFrame = null;
+
+      if (
+        !this.commentsOpen &&
+        !isDestroying(this) &&
+        !isDestroyed(this) &&
+        this.feedItemsElement?.isConnected
+      ) {
+        this.feedItemsElement.focus({ preventScroll: true });
       }
     });
   }
@@ -575,6 +787,7 @@ export default class VideoShortsFeed extends Component {
     <div
       class="video-shorts-feed__viewport"
       data-active-post-id={{this.activeItem.post_id}}
+      data-playback-post-id={{this.playbackItem.post_id}}
       data-comments-open-post-id={{this.commentsSurfaceItem.post_id}}
       data-comments-open={{if this.commentsOpen "true" "false"}}
       data-comments-layout={{if this.isDesktopLayout "desktop" "mobile"}}
@@ -590,8 +803,9 @@ export default class VideoShortsFeed extends Component {
       <ol
         class="video-shorts-feed__items"
         tabindex="0"
-        {{this.applyInitialActivePostId}}
+        {{this.applyInitialActivePostId @initialActivePostId}}
         {{this.centerOnInsert}}
+        {{this.trackScrollSettling}}
         {{on "keydown" this.handleKeydown}}
       >
         {{#each @items as |item index|}}
@@ -605,7 +819,7 @@ export default class VideoShortsFeed extends Component {
           >
             <VideoShortsItem
               @item={{item}}
-              @isActive={{eq index this.activeIndex}}
+              @isActive={{eq index this.playbackIndex}}
               @isMuted={{this.mediaMuted}}
               @shouldPreload={{this.isWithinPreloadWindow index}}
               @replyCount={{this.replyCountFor item}}

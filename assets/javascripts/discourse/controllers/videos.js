@@ -56,14 +56,16 @@ export default class VideosController extends Controller {
     return "No videos are available yet.";
   }
 
-  async loadCursor(cursor) {
+  async loadCursor(cursor, { background = false } = {}) {
     if (!cursor || this.loadingMore) {
       return;
     }
 
     try {
       this.loadingMore = true;
-      this.error = null;
+      if (!background) {
+        this.error = null;
+      }
 
       const response = await fetchVideoShortsPage({ cursor });
       this.items = mergeVideoShortsItems(this.items, response.items);
@@ -72,7 +74,9 @@ export default class VideosController extends Controller {
       this.autoContinuationCapped = false;
       this.failedCursor = null;
     } catch (error) {
-      this.error = error;
+      if (!background) {
+        this.error = error;
+      }
       this.failedCursor = cursor;
     } finally {
       this.loadingMore = false;
@@ -96,7 +100,10 @@ export default class VideosController extends Controller {
 
     const nextUrl = `${url.pathname}${url.search}${url.hash}`;
 
-    if (nextUrl === `${window.location.pathname}${window.location.search}${window.location.hash}`) {
+    if (
+      nextUrl ===
+      `${window.location.pathname}${window.location.search}${window.location.hash}`
+    ) {
       return;
     }
 
@@ -106,6 +113,11 @@ export default class VideosController extends Controller {
   @action
   loadMore() {
     return this.loadCursor(this.nextCursor);
+  }
+
+  @action
+  loadMoreNearEnd() {
+    return this.loadCursor(this.nextCursor, { background: true });
   }
 
   @action
