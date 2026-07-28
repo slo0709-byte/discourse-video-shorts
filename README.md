@@ -29,6 +29,8 @@ The plugin does not require Discourse core modifications.
 Enable and configure the feed from site settings:
 
 - `video_shorts_enabled`: enables `/videos` and `/videos.json`.
+- `video_shorts_youtube_enabled`: includes YouTube videos in the Shorts feed; disabling it does not alter original topics or embeds.
+- `video_shorts_bilibili_enabled`: includes Bilibili videos in the Shorts feed; disabling it does not alter original topics or embeds.
 - `video_shorts_source_category_ids`: pipe-delimited category ids. Matching is exact category only.
 - `video_shorts_source_tag_names`: pipe-delimited tag names. Tags are ignored when Discourse tagging is disabled.
 - `video_shorts_hls_allowed_origins`: optional HTTPS HLS origins shown in diagnostics.
@@ -38,6 +40,11 @@ Enable and configure the feed from site settings:
 - `video_shorts_debug_mode`: staff-facing diagnostics only.
 
 Source matching is topic-level OR semantics: a post is eligible when its topic matches any configured source category or any configured source tag. Replies inherit their topic category and tags for source matching.
+
+Provider switches are applied after media classification and before feed
+serialization. Native uploads, HLS, Vimeo, original topic routes, and Discourse
+oneboxes are unaffected. Changing a provider switch invalidates existing feed
+cursors so pagination cannot mix two platform configurations.
 
 ## Admin
 
@@ -105,9 +112,20 @@ There is no custom like, save, comment, share, or report system.
 
 ## Browser Behavior
 
-Native videos are muted, inline, looped, and controlled by the active feed item. Native video elements are active-only: offscreen native items render placeholders and do not keep a mounted `<video>`.
+Native videos are muted, inline, looped, and controlled by the committed active
+feed item. The active native video uses automatic preload; at most its immediate
+native neighbors remain mounted with metadata-only preload so the next snap can
+start without a cold media attach. Neighbor prewarming is disabled when the
+browser reports data-saver mode or a 2G connection. Only the active item can
+play or expose controls, and native players outside that three-item window are
+torn down.
 
 Trusted provider iframes are also active-only. The active provider item renders a real iframe after snap or keyboard navigation; offscreen provider items render placeholders instead of eagerly loading every third-party iframe in the response page. Provider iframe playback controls remain provider-owned.
+
+Intersection changes nominate a playback candidate, but playback and URL state
+are committed only after `scrollend` or a short scroll-quiet fallback. Moving
+within five items of the current page tail starts one background continuation
+request; the visible Load more button remains available as the manual fallback.
 
 The desktop comments panel and mobile bottom sheet have their own scroll containers. Scrolling, Space, and ArrowDown while focus is inside comments or the reply input do not advance the video feed.
 
