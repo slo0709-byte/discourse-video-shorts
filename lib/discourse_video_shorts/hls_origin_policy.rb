@@ -64,6 +64,8 @@ module DiscourseVideoShorts
       https://player.bilibili.com
       https://www.bilibili.com
       https://player.vimeo.com
+      https://www.tiktok.com
+      https://open.douyin.com
     ].freeze
 
     def each

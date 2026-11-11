@@ -1035,6 +1035,28 @@ body.video-shorts-route.video-shorts-lightweight-composer-open {
     --video-shorts-desktop-metadata-controls-reserve: 3.25rem;
   }
 
+  .video-shorts-item[data-video-shorts-provider="tiktok"] {
+    --video-shorts-desktop-metadata-controls-reserve: 4.5rem;
+  }
+
+  .video-shorts-item[data-video-shorts-provider="douyin"] {
+    --video-shorts-desktop-metadata-controls-reserve: 7rem;
+  }
+
+  .video-shorts-item[data-video-shorts-provider="douyin"]
+    .video-shorts-item__info {
+    box-sizing: border-box;
+    width: calc(var(--video-shorts-stage-width) - 9rem);
+    padding: 0.5rem 0.625rem;
+    border-radius: var(--video-shorts-radius-md);
+    background: rgb(0 0 0 / 0.94);
+  }
+
+  .video-shorts-item[data-video-shorts-provider="douyin"]
+    .video-shorts-metadata__excerpt {
+    -webkit-line-clamp: 1;
+  }
+
   .video-shorts-item__player {
     grid-row: 1;
     grid-column: 1 / -1;
@@ -1234,6 +1256,16 @@ body.video-shorts-route.video-shorts-lightweight-composer-open {
   }
 
   .video-shorts-item[data-video-shorts-provider="bilibili"] {
+    --video-shorts-mobile-metadata-controls-reserve: 4rem;
+    --video-shorts-mobile-rail-controls-reserve: 3.25rem;
+  }
+
+  .video-shorts-item[data-video-shorts-provider="tiktok"] {
+    --video-shorts-mobile-metadata-controls-reserve: 4.5rem;
+    --video-shorts-mobile-rail-controls-reserve: 4rem;
+  }
+
+  .video-shorts-item[data-video-shorts-provider="douyin"] {
     --video-shorts-mobile-metadata-controls-reserve: 4rem;
     --video-shorts-mobile-rail-controls-reserve: 3.25rem;
   }
@@ -1469,6 +1501,12 @@ body.video-shorts-route.video-shorts-lightweight-composer-open {
     );
   }
 
+  .video-shorts-item[data-video-shorts-provider="tiktok"]
+    .video-shorts-action-rail {
+    top: clamp(4rem, 18vh, 12rem);
+    bottom: auto;
+  }
+
   .video-shorts-comments-sheet {
     margin: auto 0 0;
     overflow: hidden;
@@ -1564,6 +1602,83 @@ body.video-shorts-route.video-shorts-lightweight-composer-open {
     .video-shorts-comments-sheet
     + .d-modal__backdrop {
     animation-duration: 120ms;
+  }
+}
+
+@media (480px <= width < 1024px) {
+  .video-shorts-item[data-video-shorts-provider="tiktok"] {
+    --video-shorts-mobile-metadata-controls-reserve: clamp(
+      7rem,
+      12svh,
+      8.5rem
+    );
+  }
+
+  .video-shorts-item[data-video-shorts-provider="douyin"] {
+    --video-shorts-douyin-player-width: min(30rem, 100%);
+    --video-shorts-mobile-metadata-controls-reserve: 20rem;
+  }
+
+  .video-shorts-item[data-video-shorts-provider="douyin"]
+    .video-shorts-embed-player {
+    display: grid;
+    place-items: center;
+  }
+
+  .video-shorts-item[data-video-shorts-provider="douyin"]
+    .video-shorts-embed-player__iframe {
+    align-self: center;
+    justify-self: center;
+    width: var(--video-shorts-douyin-player-width);
+    max-width: 100%;
+    height: auto;
+    max-height: 100%;
+    aspect-ratio: 9 / 16;
+  }
+
+  .video-shorts-item[data-video-shorts-provider="douyin"]
+    .video-shorts-item__info {
+    right: max(12.75rem, calc(50% - 15rem + 12.75rem));
+    left: max(0.75rem, calc(50% - 15rem + 0.75rem));
+    box-sizing: border-box;
+    padding: 0.5rem 0.625rem;
+    border-radius: var(--video-shorts-radius-md);
+    background: rgb(0 0 0 / 0.94);
+  }
+
+  .video-shorts-item[data-video-shorts-provider="douyin"]
+    .video-shorts-metadata__excerpt {
+    -webkit-line-clamp: 1;
+  }
+}
+
+@media (width < 480px) {
+  .video-shorts-item[data-video-shorts-provider="douyin"] {
+    --video-shorts-mobile-metadata-controls-reserve: clamp(
+      9rem,
+      26svh,
+      13.75rem
+    );
+  }
+
+  .video-shorts-item[data-video-shorts-provider="douyin"]
+    .video-shorts-action-rail {
+    top: max(0.75rem, env(safe-area-inset-top));
+    bottom: auto;
+  }
+
+  .video-shorts-item[data-video-shorts-provider="douyin"]
+    .video-shorts-item__info {
+    right: calc(98px + max(0.75rem, env(safe-area-inset-right)));
+    box-sizing: border-box;
+    padding: 0.5rem 0.625rem;
+    border-radius: var(--video-shorts-radius-md);
+    background: rgb(0 0 0 / 0.94);
+  }
+
+  .video-shorts-item[data-video-shorts-provider="douyin"]
+    .video-shorts-metadata__excerpt {
+    -webkit-line-clamp: 1;
   }
 }
 

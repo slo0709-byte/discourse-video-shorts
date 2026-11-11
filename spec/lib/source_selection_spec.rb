@@ -10,6 +10,8 @@ RSpec.describe DiscourseVideoShorts::SourceSelection do
     SiteSetting.video_shorts_enabled = true
     SiteSetting.video_shorts_youtube_enabled = true
     SiteSetting.video_shorts_bilibili_enabled = true
+    SiteSetting.video_shorts_tiktok_enabled = true
+    SiteSetting.video_shorts_douyin_enabled = true
     SiteSetting.video_shorts_source_category_ids = ""
     SiteSetting.video_shorts_source_tag_names = ""
     SiteSetting.video_shorts_page_size = 20
@@ -158,9 +160,18 @@ RSpec.describe DiscourseVideoShorts::SourceSelection do
     SiteSetting.video_shorts_youtube_enabled = true
     SiteSetting.video_shorts_bilibili_enabled = false
     bilibili_disabled_digest = resolve.cursor_scope_digest
+    SiteSetting.video_shorts_bilibili_enabled = true
+    SiteSetting.video_shorts_tiktok_enabled = false
+    tiktok_disabled_digest = resolve.cursor_scope_digest
+    SiteSetting.video_shorts_tiktok_enabled = true
+    SiteSetting.video_shorts_douyin_enabled = false
+    douyin_disabled_digest = resolve.cursor_scope_digest
 
     expect(enabled_digest).not_to eq(youtube_disabled_digest)
     expect(enabled_digest).not_to eq(bilibili_disabled_digest)
+    expect(enabled_digest).not_to eq(tiktok_disabled_digest)
+    expect(enabled_digest).not_to eq(douyin_disabled_digest)
     expect(youtube_disabled_digest).not_to eq(bilibili_disabled_digest)
+    expect(tiktok_disabled_digest).not_to eq(douyin_disabled_digest)
   end
 end

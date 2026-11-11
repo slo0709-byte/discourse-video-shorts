@@ -8,6 +8,8 @@ RSpec.describe "Discourse video shorts feed" do
     SiteSetting.video_shorts_enabled = true
     SiteSetting.video_shorts_youtube_enabled = true
     SiteSetting.video_shorts_bilibili_enabled = true
+    SiteSetting.video_shorts_tiktok_enabled = true
+    SiteSetting.video_shorts_douyin_enabled = true
     SiteSetting.video_shorts_source_category_ids = ""
     SiteSetting.video_shorts_source_tag_names = ""
     SiteSetting.video_shorts_page_size = 20
@@ -348,6 +350,97 @@ RSpec.describe "Discourse video shorts feed" do
     expect(item["media"]).not_to have_key("fallback")
   end
 
+  it "serializes TikTok and Douyin iframe candidates with sanitized embed URLs" do
+    category = Fabricate(:category)
+    tiktok_post =
+      make_text_post(
+        category: category,
+        raw:
+          "https://www.tiktok.com/@scout2015/video/6718335390845095173?tracking=secret",
+      )
+    douyin_post =
+      make_text_post(
+        category: category,
+        raw: "https://www.douyin.com/video/7380000000000000001?tracking=secret",
+      )
+    SiteSetting.video_shorts_source_category_ids = category.id.to_s
+
+    get "/videos.json"
+
+    items = response.parsed_body["items"].index_by { |item| item["post_id"] }
+    expect(items.fetch(tiktok_post.id)["media"]).to include(
+      "provider" => "tiktok",
+      "renderability" => "iframe_candidate",
+      "embed_url" =>
+        "https://www.tiktok.com/player/v1/6718335390845095173?autoplay=0&loop=1&rel=0",
+      "dedupe_key" => "tiktok:6718335390845095173",
+    )
+    expect(items.fetch(douyin_post.id)["media"]).to include(
+      "provider" => "douyin",
+      "renderability" => "iframe_candidate",
+      "embed_url" =>
+        "https://open.douyin.com/player/video?vid=7380000000000000001&autoplay=0",
+      "dedupe_key" => "douyin:7380000000000000001",
+    )
+    expect(response.body).not_to include("tracking", "secret")
+  end
+
+  it "rejects structured Douyin video ids without failing the feed" do
+    category = Fabricate(:category)
+    unsafe_post =
+      make_text_post(
+        category: category,
+        raw:
+          '<iframe src="https://open.douyin.com/player/video?vid%5B%5D=7380000000000000001&vid=7380000000000000001"></iframe>',
+      )
+    safe_post =
+      make_text_post(
+        category: category,
+        raw: "https://www.douyin.com/video/7380000000000000002",
+      )
+    SiteSetting.video_shorts_source_category_ids = category.id.to_s
+
+    get "/videos.json"
+
+    items = response.parsed_body["items"].index_by { |item| item["post_id"] }
+    expect(response.status).to eq(200)
+    expect(items.fetch(safe_post.id)["media"]).to include(
+      "renderability" => "iframe_candidate",
+      "dedupe_key" => "douyin:7380000000000000002",
+    )
+    expect(items.dig(unsafe_post.id, "media", "renderability")).not_to eq("iframe_candidate")
+  end
+
+  it "keeps unresolved TikTok and Douyin short links as topic fallbacks without leaking query parameters" do
+    category = Fabricate(:category)
+    tiktok_post =
+      make_text_post(
+        category: category,
+        raw: "https://vm.tiktok.com/ZMexample/?tracking=secret",
+      )
+    douyin_post =
+      make_text_post(
+        category: category,
+        raw: "https://v.douyin.com/example/?tracking=secret",
+      )
+    SiteSetting.video_shorts_source_category_ids = category.id.to_s
+
+    get "/videos.json"
+
+    items = response.parsed_body["items"].index_by { |item| item["post_id"] }
+    expect(items.fetch(tiktok_post.id)["media"]).to include(
+      "provider" => "tiktok",
+      "renderability" => "fallback",
+      "fallback" => "post",
+    )
+    expect(items.fetch(douyin_post.id)["media"]).to include(
+      "provider" => "douyin",
+      "renderability" => "fallback",
+      "fallback" => "post",
+    )
+    expect(response.body).not_to include("tracking", "secret")
+  end
+
   it "excludes YouTube only from the Shorts feed when YouTube support is disabled" do
     category = Fabricate(:category)
     youtube_post =
@@ -386,6 +479,58 @@ RSpec.describe "Discourse video shorts feed" do
     expect(items.map { |item| item["post_id"] }).not_to include(bilibili_post.id)
     expect(bilibili_post.reload.raw).to eq(bilibili_raw)
     expect(bilibili_post.topic).to be_present
+  end
+
+  it "excludes TikTok only from the Shorts feed when TikTok support is disabled" do
+    category = Fabricate(:category)
+    tiktok_post =
+      make_text_post(
+        category: category,
+        raw: "https://www.tiktok.com/@scout2015/video/6718335390845095173",
+      )
+    douyin_post =
+      make_text_post(
+        category: category,
+        raw: "https://www.douyin.com/video/7380000000000000001",
+      )
+    tiktok_raw = tiktok_post.raw
+    SiteSetting.video_shorts_source_category_ids = category.id.to_s
+    SiteSetting.video_shorts_tiktok_enabled = false
+
+    get "/videos.json"
+
+    items = response.parsed_body["items"]
+    expect(response.status).to eq(200)
+    expect(items.map { |item| item["post_id"] }).to include(douyin_post.id)
+    expect(items.map { |item| item["post_id"] }).not_to include(tiktok_post.id)
+    expect(tiktok_post.reload.raw).to eq(tiktok_raw)
+    expect(tiktok_post.topic).to be_present
+  end
+
+  it "excludes Douyin only from the Shorts feed when Douyin support is disabled" do
+    category = Fabricate(:category)
+    tiktok_post =
+      make_text_post(
+        category: category,
+        raw: "https://www.tiktok.com/@scout2015/video/6718335390845095173",
+      )
+    douyin_post =
+      make_text_post(
+        category: category,
+        raw: "https://www.douyin.com/video/7380000000000000001",
+      )
+    douyin_raw = douyin_post.raw
+    SiteSetting.video_shorts_source_category_ids = category.id.to_s
+    SiteSetting.video_shorts_douyin_enabled = false
+
+    get "/videos.json"
+
+    items = response.parsed_body["items"]
+    expect(response.status).to eq(200)
+    expect(items.map { |item| item["post_id"] }).to include(tiktok_post.id)
+    expect(items.map { |item| item["post_id"] }).not_to include(douyin_post.id)
+    expect(douyin_post.reload.raw).to eq(douyin_raw)
+    expect(douyin_post.topic).to be_present
   end
 
   it "serializes escaped provider iframes as embeds without leaking iframe markup into excerpt" do

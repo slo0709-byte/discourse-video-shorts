@@ -9,6 +9,7 @@ module DiscourseVideoShorts
     IFRAME_TEXT_PATTERN = %r{<iframe\b[^>]*>.*?</iframe>}im
     IFRAME_OPEN_TEXT_PATTERN = %r{<iframe\b[^>]*>}im
     IFRAME_FRAGMENT_TEXT_PATTERN = %r{<iframe\b.*}im
+    SOURCE_URL_PATTERN = %r{https?://[^\s<>"')]+}
 
     def initialize(guardian:, page_size: nil, scan_limit: nil, cursor: nil)
       @guardian = guardian
@@ -205,7 +206,8 @@ module DiscourseVideoShorts
 
     def excerpt_html(post, media)
       cooked = post.cooked.to_s
-      return cooked if %w[iframe_candidate hls].exclude?(media[:renderability]) && media[:provider] != "hls"
+      return cooked if %w[iframe_candidate hls].exclude?(media[:renderability]) &&
+        media[:provider] != "hls" && %w[tiktok douyin].exclude?(media[:provider])
 
       fragment = Nokogiri::HTML5.fragment(cooked)
       fragment.css("iframe").remove
@@ -217,10 +219,13 @@ module DiscourseVideoShorts
 
         decoded = CGI.unescapeHTML(node.content)
         node.content =
-          decoded
-            .gsub(IFRAME_TEXT_PATTERN, "")
-            .gsub(IFRAME_OPEN_TEXT_PATTERN, "")
-            .gsub(IFRAME_FRAGMENT_TEXT_PATTERN, "")
+          strip_provider_source_urls(
+            decoded
+              .gsub(IFRAME_TEXT_PATTERN, "")
+              .gsub(IFRAME_OPEN_TEXT_PATTERN, "")
+              .gsub(IFRAME_FRAGMENT_TEXT_PATTERN, ""),
+            media,
+          )
       end
       fragment.to_html
     end
@@ -234,12 +239,31 @@ module DiscourseVideoShorts
     end
 
     def provider_source_anchor?(href, media)
-      source_url = media[:embed_url] || media[:hls_url]
+      source_url = media[:source_url] || media[:embed_url] || media[:hls_url]
       return false if href.blank? || source_url.blank?
 
       href.include?(URI.parse(source_url).host)
     rescue URI::InvalidURIError
       false
+    end
+
+    def strip_provider_source_urls(text, media)
+      return text if %w[tiktok douyin].exclude?(media[:provider])
+
+      video_id = media[:dedupe_key].to_s.split(":").last
+      source_uri = URI.parse(media[:source_url].to_s) if media[:source_url].present?
+
+      text.gsub(SOURCE_URL_PATTERN) do |url|
+        uri = URI.parse(url)
+        same_fallback_source =
+          media[:renderability] == "fallback" && source_uri.present? &&
+            uri.host == source_uri.host && uri.path == source_uri.path
+        same_video = media[:renderability] != "fallback" && video_id.present? && url.include?(video_id)
+
+        same_fallback_source || same_video ? "" : url
+      rescue URI::InvalidURIError
+        url
+      end
     end
 
     def action_state(post, liked_post_ids:, bookmarks_by_post_id:, native_action_summary:)

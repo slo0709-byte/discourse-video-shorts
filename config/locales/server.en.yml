@@ -3,6 +3,8 @@ en:
     video_shorts_enabled: "Enable the video shorts feed."
     video_shorts_youtube_enabled: "Include YouTube videos in the video shorts feed. Disabling this leaves the original Discourse topics and embeds unchanged."
     video_shorts_bilibili_enabled: "Include Bilibili videos in the video shorts feed. Disabling this leaves the original Discourse topics and embeds unchanged."
+    video_shorts_tiktok_enabled: "Include TikTok videos in the video shorts feed. Disabling this leaves the original Discourse topics and embeds unchanged."
+    video_shorts_douyin_enabled: "Include Douyin videos in the video shorts feed. Disabling this leaves the original Discourse topics and embeds unchanged."
     video_shorts_source_category_ids: "Category IDs eligible for the video shorts feed."
     video_shorts_source_tag_names: "Tag names eligible for the video shorts feed."
     video_shorts_hls_allowed_origins: "Optional HTTPS HLS origins shown in diagnostics. HTTPS m3u8 playback is allowed even when an origin is not listed."

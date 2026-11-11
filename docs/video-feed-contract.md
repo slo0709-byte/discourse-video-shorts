@@ -80,10 +80,10 @@ Provider iframe media:
 
 ```json
 {
-  "provider": "bilibili",
+  "provider": "tiktok",
   "renderability": "iframe_candidate",
-  "embed_url": "https://player.bilibili.com/player.html?bvid=BV1Q541167Qg&page=1",
-  "dedupe_key": "bilibili:BV1Q541167Qg:page:1"
+  "embed_url": "https://www.tiktok.com/player/v1/6718335390845095173?autoplay=0&loop=1&rel=0",
+  "dedupe_key": "tiktok:6718335390845095173"
 }
 ```
 
@@ -111,6 +111,10 @@ Rules:
 - Cross-page duplicate media is allowed in v1.
 - Native upload URLs are emitted only after post visibility is confirmed and through current Discourse URL helpers.
 - Provider media includes `embed_url` only when `renderability` is `iframe_candidate` and the server has normalized it to a trusted HTTPS allowlisted provider URL. Fallback provider media must not include `embed_url`.
+- TikTok canonical post URLs such as `https://www.tiktok.com/@user/video/<video_id>` and TikTok official player URLs normalize to `https://www.tiktok.com/player/v1/<video_id>?autoplay=0&loop=1&rel=0`.
+- Douyin canonical post URLs such as `https://www.douyin.com/video/<video_id>`, Douyin share URLs such as `https://www.iesdouyin.com/share/video/<video_id>`, and Douyin official player URLs normalize to `https://open.douyin.com/player/video?vid=<video_id>&autoplay=0`.
+- Unresolved TikTok and Douyin short links, including `vm.tiktok.com`, `vt.tiktok.com`, TikTok `/t/`, and `v.douyin.com`, are emitted as original-topic fallbacks without `embed_url`; the plugin does not expand short links.
+- Provider switches for YouTube, Bilibili, TikTok, and Douyin are independent Shorts-feed filters. Disabling one removes only that provider's items from `/videos.json`; it does not edit, hide, or replace original Discourse topics, comments, or embeds.
 - `native_action_summary` mirrors Discourse `PostSerializer#actions_summary` for native post action flows such as like and flag/report; clients must treat action ids as Discourse-provided values, not plugin-defined enums.
 - `counts.reply_count` is the count of visible comments under the video item, not only the direct `Post#reply_count`: OP video posts count visible topic comments excluding the source post; non-OP video posts count visible descendants through `PostReply`. Hidden, deleted, or inaccessible replies are excluded.
 
@@ -123,13 +127,14 @@ Rules:
 - Metadata stays inside `.video-shorts-item__stage`.
 - Native videos are active-only. Offscreen native items render placeholders and do not keep mounted `<video>` elements.
 - Provider `iframe_candidate` media is active-only and renders only after the browser revalidates provider, protocol, host, and path. Offscreen provider items render placeholders and do not keep mounted iframes.
+- Active provider iframes must use sanitized official player URLs only: YouTube embed, Bilibili player, Vimeo player, TikTok `www.tiktok.com/player/v1`, or Douyin `open.douyin.com/player/video`.
 - Unsupported or unsafe provider media renders a fallback topic link when the item is active.
 - The right comments panel and bottom sheet own their scroll containers. Feed keyboard shortcuts are ignored while focus is inside comments, dialogs, or reply inputs.
 - Reduced-motion preference keeps feed scroll behavior non-animated.
 
 ## CSP Requirements
 
-Trusted provider iframes require a compatible Discourse `frame-src` policy. The plugin adds exact sources for `self`, `https://www.youtube.com`, `https://www.youtube-nocookie.com`, `https://player.bilibili.com`, `https://www.bilibili.com`, and `https://player.vimeo.com`. Its `media-src` policy allows self-hosted media, blobs, HTTPS media, configured HLS origins, and active Discourse CDN origins. Provider candidates still revalidate protocol, host, and path in the browser before rendering an iframe.
+Trusted provider iframes require a compatible Discourse `frame-src` policy. The plugin adds exact sources for `self`, `https://www.youtube.com`, `https://www.youtube-nocookie.com`, `https://player.bilibili.com`, `https://www.bilibili.com`, `https://player.vimeo.com`, `https://www.tiktok.com`, and `https://open.douyin.com`. Its `media-src` policy allows self-hosted media, blobs, HTTPS media, configured HLS origins, and active Discourse CDN origins. Provider candidates still revalidate protocol, host, and path in the browser before rendering an iframe.
 
 ## Comments Contract
 

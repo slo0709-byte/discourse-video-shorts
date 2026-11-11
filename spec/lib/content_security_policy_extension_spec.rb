@@ -21,6 +21,8 @@ RSpec.describe DiscourseVideoShorts::ContentSecurityPolicySourceExtension do
       "https://player.bilibili.com",
       "https://www.bilibili.com",
       "https://player.vimeo.com",
+      "https://www.tiktok.com",
+      "https://open.douyin.com",
     )
     expect(directives["frame-src"]).not_to include("https:", "http:")
     expect(directives["media-src"]).to include("'self'", "blob:", "https:")

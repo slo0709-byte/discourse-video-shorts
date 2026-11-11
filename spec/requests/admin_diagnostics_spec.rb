@@ -11,6 +11,8 @@ RSpec.describe "Discourse video shorts admin diagnostics" do
     SiteSetting.video_shorts_enabled = true
     SiteSetting.video_shorts_youtube_enabled = true
     SiteSetting.video_shorts_bilibili_enabled = true
+    SiteSetting.video_shorts_tiktok_enabled = true
+    SiteSetting.video_shorts_douyin_enabled = true
     SiteSetting.video_shorts_source_category_ids = ""
     SiteSetting.video_shorts_source_tag_names = ""
     SiteSetting.video_shorts_page_size = 20
@@ -102,6 +104,8 @@ RSpec.describe "Discourse video shorts admin diagnostics" do
     expect(body["settings_summary"]).to include(
       "youtube_enabled" => false,
       "bilibili_enabled" => true,
+      "tiktok_enabled" => true,
+      "douyin_enabled" => true,
     )
     expect(body.dig("providers", "counts")).to include(
       include("name" => "youtube", "count" => 0),

@@ -6,7 +6,8 @@ module DiscourseVideoShorts
       DEFAULT_SAMPLE_SIZE = 10
       MAX_SAMPLE_SIZE = 25
       MAX_SCAN_LIMIT = 1000
-      PROVIDER_BUCKETS = %w[native hls youtube bilibili vimeo fallback unsupported unknown].freeze
+      PROVIDER_BUCKETS =
+        %w[native hls youtube bilibili tiktok douyin vimeo fallback unsupported unknown].freeze
       RENDERABILITY_BUCKETS = %w[native hls iframe_candidate fallback unknown].freeze
 
       def initialize(guardian:, sample_size: nil, scan_limit: nil)
@@ -71,6 +72,8 @@ module DiscourseVideoShorts
           configured_candidate_scan_limit: SiteSetting.video_shorts_candidate_scan_limit,
           youtube_enabled: ProviderPolicy.enabled?("youtube"),
           bilibili_enabled: ProviderPolicy.enabled?("bilibili"),
+          tiktok_enabled: ProviderPolicy.enabled?("tiktok"),
+          douyin_enabled: ProviderPolicy.enabled?("douyin"),
           debug_mode: SiteSetting.video_shorts_debug_mode,
         }
       end

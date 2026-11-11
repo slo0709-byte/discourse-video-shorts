@@ -60,6 +60,15 @@
   body.video-shorts-route .video-shorts-mobile-back .d-icon {
     width: 1.15rem;
     height: 1.15rem;
+    filter: drop-shadow(0 1px 2px rgb(0 0 0 / 0.85));
+  }
+
+  body.video-shorts-route:has(
+      .video-shorts-feed__item[aria-current="true"]
+        .video-shorts-item[data-video-shorts-provider="tiktok"]
+    )
+    .video-shorts-mobile-back {
+    top: max(5rem, calc(env(safe-area-inset-top) + 4rem));
   }
 }
 

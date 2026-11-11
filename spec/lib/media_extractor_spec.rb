@@ -242,6 +242,25 @@ RSpec.describe DiscourseVideoShorts::MediaExtractor do
     expect(vimeo[:dedupe_key]).to start_with("vimeo:raw:")
   end
 
+  it "routes TikTok and Douyin posts through their official iframe players" do
+    tiktok =
+      extract(raw: "https://www.tiktok.com/@scout2015/video/6718335390845095173")
+    douyin = extract(raw: "https://www.douyin.com/video/7380000000000000001")
+
+    expect(tiktok).to include(
+      provider: "tiktok",
+      renderability: "iframe_candidate",
+      embed_url:
+        "https://www.tiktok.com/player/v1/6718335390845095173?autoplay=0&loop=1&rel=0",
+    )
+    expect(douyin).to include(
+      provider: "douyin",
+      renderability: "iframe_candidate",
+      embed_url:
+        "https://open.douyin.com/player/video?vid=7380000000000000001&autoplay=0",
+    )
+  end
+
   it "rejects non-HTTPS and non-allowlisted YouTube iframe sources as provider fallback" do
     non_https =
       extract(

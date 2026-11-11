@@ -45,6 +45,7 @@ after_initialize do
   require_relative "lib/discourse_video_shorts/direct_comments"
   require_relative "lib/discourse_video_shorts/provider_policy"
   require_relative "lib/discourse_video_shorts/feed"
+  require_relative "lib/discourse_video_shorts/tiktok_douyin_extractor"
   require_relative "lib/discourse_video_shorts/media_extractor"
   require_relative "lib/discourse_video_shorts/media_extractor_cache"
   require_relative "lib/discourse_video_shorts/source_selection"

@@ -29,7 +29,7 @@ module DiscourseVideoShorts
     def extract
       native_upload_descriptor || hls_descriptor || bilibili_canonical_descriptor ||
         bilibili_iframe_descriptor || youtube_vimeo_iframe_descriptor || raw_known_provider_descriptor ||
-        unsupported_intended_video_descriptor
+        TikTokDouyinExtractor.extract(post) || unsupported_intended_video_descriptor
     end
 
     private

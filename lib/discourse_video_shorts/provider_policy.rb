@@ -5,6 +5,8 @@ module DiscourseVideoShorts
     SITE_SETTING_BY_PROVIDER = {
       "youtube" => :video_shorts_youtube_enabled,
       "bilibili" => :video_shorts_bilibili_enabled,
+      "tiktok" => :video_shorts_tiktok_enabled,
+      "douyin" => :video_shorts_douyin_enabled,
     }.freeze
 
     module_function

@@ -96,11 +96,16 @@ theme or layout adjustment cannot desynchronize the stage and action rail.
 | --------- | ---------------------- | ---------------- | ---------------------------------- |
 | YouTube   | `7.5rem / 7.5rem`      | `7.5rem`         | Mobile drag target occupies the band 52–96px above the stage bottom; bottom controls begin about 126px above it |
 | Bilibili  | `4rem / 3.25rem`       | `3.25rem`        | Mobile control bar is 44px tall and the progress line sits about 21–23px above the stage bottom; metadata keeps an extra 0.75rem visual buffer |
+| TikTok    | `<480px: 4.5rem`; tablet: clamp(7rem, 12svh, 8.5rem) / top anchored | `4.5rem` | Metadata clears the playback bar at both narrow and tablet heights; the six-item Discourse rail uses `clamp(4rem, 18vh, 12rem)` from the top so it does not stack over TikTok's own lower social controls |
+| Douyin    | `<480px: clamp(9rem, 26svh, 13.75rem) / top anchored`; tablet: `20rem / 3.25rem` | `7rem` | Narrow metadata covers duplicate provider captions but ends before progress. Tablet embeds are constrained to a centered, at-most-30rem 9:16 official-player viewport; the wider tablet metadata inset also clears Douyin's internal social rail and progress line |
 
-These reserves apply only to trusted provider iframes. Native and HLS media keep
-their existing overlay placement. Metadata clears provider controls at every
+These reserves and the TikTok rail anchor apply only to trusted provider
+iframes. Native and HLS media keep their existing overlay placement. Metadata
+clears provider controls at every
 breakpoint; the mobile action rail consumes its own named reserve while the
 desktop rail remains outside the stage.
+TikTok also moves the transparent back hit target below the provider's profile
+header so the arrow remains visible without reintroducing a painted background.
 
 ### Grid and Scroll Ownership
 
@@ -158,9 +163,9 @@ desktop rail remains outside the stage.
   the embedded player's own controls; no transparent proxy layer covers or
   attempts to forward cross-origin progress gestures.
 - **Admin capability contract**: native Discourse site settings independently
-  control whether YouTube and Bilibili items enter the Shorts feed. Disabling a
-  provider never edits, hides, or replaces its original Discourse topic or
-  native onebox/embed.
+  control whether YouTube, Bilibili, TikTok, and Douyin items enter the Shorts
+  feed. Disabling a provider never edits, hides, or replaces its original
+  Discourse topic, comments, or native onebox/embed.
 
 ### Action rail
 
@@ -175,9 +180,9 @@ desktop rail remains outside the stage.
   `up-right-from-square` icon and links directly to the original post.
 - **Motion**: micro feedback uses only `transform` and `opacity`.
 - **Layout**: vertical `stack`.
-- **Provider controls**: metadata ends above the measured YouTube or Bilibili
-  control band at every breakpoint. On mobile, the rail also ends above that
-  band instead of occupying the embedded progress area.
+- **Provider controls**: metadata ends above the measured YouTube, Bilibili,
+  TikTok, or Douyin control band at every breakpoint. On mobile, the rail also
+  ends above that band instead of occupying the embedded progress area.
 - **Mobile comments state**: while the bottom sheet is open, the background rail
   is non-painted and non-interactive until the sheet closes; the desktop rail
   remains visible beside its comments panel.

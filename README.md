@@ -31,6 +31,8 @@ Enable and configure the feed from site settings:
 - `video_shorts_enabled`: enables `/videos` and `/videos.json`.
 - `video_shorts_youtube_enabled`: includes YouTube videos in the Shorts feed; disabling it does not alter original topics or embeds.
 - `video_shorts_bilibili_enabled`: includes Bilibili videos in the Shorts feed; disabling it does not alter original topics or embeds.
+- `video_shorts_tiktok_enabled`: includes TikTok videos in the Shorts feed; disabling it does not alter original topics or embeds.
+- `video_shorts_douyin_enabled`: includes Douyin videos in the Shorts feed; disabling it does not alter original topics or embeds.
 - `video_shorts_source_category_ids`: pipe-delimited category ids. Matching is exact category only.
 - `video_shorts_source_tag_names`: pipe-delimited tag names. Tags are ignored when Discourse tagging is disabled.
 - `video_shorts_hls_allowed_origins`: optional HTTPS HLS origins shown in diagnostics.
@@ -42,9 +44,11 @@ Enable and configure the feed from site settings:
 Source matching is topic-level OR semantics: a post is eligible when its topic matches any configured source category or any configured source tag. Replies inherit their topic category and tags for source matching.
 
 Provider switches are applied after media classification and before feed
-serialization. Native uploads, HLS, Vimeo, original topic routes, and Discourse
-oneboxes are unaffected. Changing a provider switch invalidates existing feed
-cursors so pagination cannot mix two platform configurations.
+serialization. Each provider switch affects only whether matching items enter
+the Shorts feed. Native uploads, HLS, Vimeo, original topic routes, Discourse
+comments, and Discourse oneboxes/embeds are unaffected. Changing a provider
+switch invalidates existing feed cursors so pagination cannot mix two platform
+configurations.
 
 ## Admin
 
@@ -86,15 +90,20 @@ Supported streaming links:
 Provider links and cooked embeds:
 
 - Bilibili canonical URLs such as `https://www.bilibili.com/video/BV...`
+- TikTok canonical URLs such as `https://www.tiktok.com/@user/video/6718335390845095173`
+- Douyin canonical URLs such as `https://www.douyin.com/video/7380000000000000001`
+- Douyin share URLs such as `https://www.iesdouyin.com/share/video/7380000000000000001`
 - Already-cooked Bilibili player iframe URLs
 - Already-cooked YouTube iframe URLs
 - Already-cooked Vimeo iframe URLs
+- Already-cooked TikTok player iframe URLs
+- Already-cooked Douyin player iframe URLs
 - Raw YouTube page URLs normalized to YouTube embed URLs
 - Raw Vimeo page URLs as known-provider fallbacks
 
-Current provider contract is allowlist-based: trusted YouTube, Bilibili, and Vimeo embeds are serialized as `renderability: "iframe_candidate"` with a sanitized HTTPS `embed_url`, then revalidated in the browser before an iframe is rendered. Unsupported, malformed, non-HTTPS, or non-allowlisted provider URLs render a labeled topic fallback when their item is active. `b23.tv` expansion is out of scope for v1.
+Current provider contract is allowlist-based: trusted YouTube, Bilibili, Vimeo, TikTok, and Douyin embeds are serialized as `renderability: "iframe_candidate"` with a sanitized HTTPS `embed_url`, then revalidated in the browser before an iframe is rendered. TikTok embeds use the official `https://www.tiktok.com/player/v1/<video_id>?autoplay=0&loop=1&rel=0` player. Douyin embeds use the official `https://open.douyin.com/player/video?vid=<video_id>&autoplay=0` player. Unsupported, malformed, non-HTTPS, or non-allowlisted provider URLs render a labeled topic fallback when their item is active. Unresolved short links such as `b23.tv`, `vm.tiktok.com`, `vt.tiktok.com`, TikTok `/t/`, and `v.douyin.com` are not expanded by the plugin and fall back to the original Discourse topic.
 
-The plugin extends Discourse CSP with exact `frame-src` entries for YouTube, YouTube NoCookie, `player.bilibili.com`, `www.bilibili.com`, and Vimeo. Its `media-src` policy allows self-hosted media, blobs, HTTPS HLS sources, configured origins, and the active Discourse CDN origins.
+The plugin extends Discourse CSP with exact `frame-src` entries for `self`, `https://www.youtube.com`, `https://www.youtube-nocookie.com`, `https://player.bilibili.com`, `https://www.bilibili.com`, `https://player.vimeo.com`, `https://www.tiktok.com`, and `https://open.douyin.com`. Its `media-src` policy allows self-hosted media, blobs, HTTPS HLS sources, configured origins, and the active Discourse CDN origins.
 
 ## Native Actions
 
@@ -206,6 +215,7 @@ Out of scope for v1:
 - adaptive streaming or transcoding
 - custom upload/creator studio UI
 - `b23.tv` short-link expansion
+- TikTok and Douyin short-link expansion
 - arbitrary iframe support
 - full topic timelines inside the comments sheet
 - custom comments, likes, saves, or reports

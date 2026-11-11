@@ -6,6 +6,10 @@ plugins:
     default: true
   video_shorts_bilibili_enabled:
     default: true
+  video_shorts_tiktok_enabled:
+    default: true
+  video_shorts_douyin_enabled:
+    default: true
   video_shorts_source_category_ids:
     default: ""
     type: list
