@@ -1,4 +1,5 @@
 import { ajax } from "discourse/lib/ajax";
+import { createRequestCoalescer } from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-request-coalescer";
 
 export const VIDEO_SHORTS_PAGE_SIZE = 20;
 export const VIDEO_SHORTS_INITIAL_PRELOAD_ITEMS = 3;
@@ -6,6 +7,8 @@ export const VIDEO_SHORTS_AUTO_CONTINUATION_LIMIT = 3;
 export const VIDEO_SHORTS_AUTO_CONTINUATION_MS = 1500;
 export const VIDEO_SHORTS_RESTORE_CONTINUATION_LIMIT = 5;
 export const VIDEO_SHORTS_RESTORE_CONTINUATION_MS = 2500;
+
+const coalesceInitialFeedRequest = createRequestCoalescer();
 
 export function mergeVideoShortsItems(existingItems, incomingItems) {
   const seenPostIds = new Set(existingItems.map((item) => item.post_id));
@@ -36,7 +39,7 @@ export async function fetchVideoShortsPage({
   return await ajax("/videos.json", { data });
 }
 
-export async function loadInitialVideoShortsFeed({
+async function requestInitialVideoShortsFeed({
   pageSize = VIDEO_SHORTS_PAGE_SIZE,
   preloadItems = VIDEO_SHORTS_INITIAL_PRELOAD_ITEMS,
   restorePostId = null,
@@ -122,4 +125,20 @@ export async function loadInitialVideoShortsFeed({
       initialActivePostId: null,
     };
   }
+}
+
+export function loadInitialVideoShortsFeed({
+  pageSize = VIDEO_SHORTS_PAGE_SIZE,
+  preloadItems = VIDEO_SHORTS_INITIAL_PRELOAD_ITEMS,
+  restorePostId = null,
+} = {}) {
+  const requestKey = `${pageSize}:${preloadItems}:${restorePostId ?? ""}`;
+
+  return coalesceInitialFeedRequest(requestKey, () =>
+    requestInitialVideoShortsFeed({
+      pageSize,
+      preloadItems,
+      restorePostId,
+    })
+  );
 }

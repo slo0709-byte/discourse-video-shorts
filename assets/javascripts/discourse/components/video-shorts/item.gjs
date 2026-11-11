@@ -109,6 +109,8 @@ export default class VideoShortsItem extends Component {
         <VideoShortsActionRail
           @item={{@item}}
           @replyCount={{@replyCount}}
+          @commentsOpen={{@commentsOpen}}
+          @commentsPanelId={{@commentsPanelId}}
           @onOpenComments={{@onOpenComments}}
         />
       </div>

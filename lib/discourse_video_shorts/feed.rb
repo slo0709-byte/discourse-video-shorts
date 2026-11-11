@@ -205,7 +205,8 @@ module DiscourseVideoShorts
 
     def excerpt_html(post, media)
       cooked = post.cooked.to_s
-      return cooked if %w[iframe_candidate hls].exclude?(media[:renderability]) && media[:provider] != "hls"
+      return cooked if %w[iframe_candidate hls].exclude?(media[:renderability]) &&
+        media[:provider] != "hls"
 
       fragment = Nokogiri::HTML5.fragment(cooked)
       fragment.css("iframe").remove
@@ -234,7 +235,7 @@ module DiscourseVideoShorts
     end
 
     def provider_source_anchor?(href, media)
-      source_url = media[:embed_url] || media[:hls_url]
+      source_url = media[:source_url] || media[:embed_url] || media[:hls_url]
       return false if href.blank? || source_url.blank?
 
       href.include?(URI.parse(source_url).host)

@@ -11,9 +11,15 @@ en:
         open_topic: "Open topic"
       feed:
         item_aria: "%{title}, @%{username}, position %{position} of %{total}"
+        navigation: "Short video navigation"
+        previous: "Previous video"
+        next: "Next video"
       player:
         mute: "Mute"
         unmute: "Turn sound on"
+        loading: "Loading video…"
+        load_error: "Video failed to load."
+        retry: "Retry"
       metadata:
         expand_excerpt: "Show more"
         collapse_excerpt: "Show less"
@@ -41,10 +47,10 @@ en:
         replies_error: "Could not load replies"
         retry_replies: "Retry loading replies"
         empty: "No comments yet"
-        add_comment: "Add a comment..."
+        add_comment: "Add a comment…"
         count:
-          one: "%{count} reply"
-          other: "%{count} replies"
+          one: "%{count} comment"
+          other: "%{count} comments"
         replying_to: "Replying to %{username}"
         reply_to: "Reply"
         reply_empty: "Reply cannot be empty"

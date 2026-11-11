@@ -227,7 +227,8 @@ acceptance("Video Shorts route", function (needs) {
       }
 
       observe(element) {
-        this.element = element;
+        this.elements ??= [];
+        this.elements.push(element);
       }
 
       disconnect() {}
@@ -250,32 +251,18 @@ acceptance("Video Shorts route", function (needs) {
       }
     };
     const activateItem = (index) => {
-      const observer = observers.find(
-        (candidate) =>
-          candidate.element?.dataset.videoShortsIndex === String(index)
+      const observer = observers[0];
+      const activeElement = observer.elements.find(
+        (element) => element.dataset.videoShortsIndex === String(index)
       );
 
-      for (const candidate of observers) {
-        if (candidate === observer || !candidate.element) {
-          continue;
-        }
-
-        candidate.callback([
-          {
-            isIntersecting: false,
-            intersectionRatio: 0,
-            target: candidate.element,
-          },
-        ]);
-      }
-
-      observer.callback([
-        {
-          isIntersecting: true,
-          intersectionRatio: 0.8,
-          target: observer.element,
-        },
-      ]);
+      observer.callback(
+        observer.elements.map((element) => ({
+          isIntersecting: element === activeElement,
+          intersectionRatio: element === activeElement ? 0.8 : 0,
+          target: element,
+        }))
+      );
     };
 
     try {
@@ -542,7 +529,21 @@ acceptance("Video Shorts route", function (needs) {
     assert.dom("[data-post-id='2'] video").exists();
     assert.dom("[data-post-id='3'] video").doesNotExist();
     assert.dom("[data-post-id='2'] video").hasAttribute("preload", "metadata");
-    assert.dom(".video-shorts-item__media-placeholder").exists({ count: 3 });
+    assert
+      .dom(".video-shorts-feed__item")
+      .exists({ count: 5 }, "all scroll-snap slots remain in the DOM");
+    assert
+      .dom(".video-shorts-item")
+      .exists({ count: 3 }, "only the active item and two neighbors mount fully");
+    assert
+      .dom(".video-shorts-feed__item[inert][aria-hidden='true']")
+      .exists({ count: 2 }, "off-window slots are inert and hidden");
+    assert
+      .dom(
+        ".video-shorts-feed__item-placeholder button, .video-shorts-feed__item-placeholder a"
+      )
+      .doesNotExist("off-window placeholders have no focusable controls");
+    assert.dom(".video-shorts-item__media-placeholder").exists({ count: 1 });
 
     await triggerKeyEvent(".video-shorts-feed__items", "keydown", "ArrowDown");
     await waitUntil(
@@ -625,7 +626,8 @@ acceptance("Video Shorts route", function (needs) {
       }
 
       observe(element) {
-        this.element = element;
+        this.elements ??= [];
+        this.elements.push(element);
       }
 
       disconnect() {}
@@ -648,15 +650,16 @@ acceptance("Video Shorts route", function (needs) {
         "[data-post-id='1'] .video-shorts-native-player__video"
       );
       const previousPauseCount = pauseCounts.get(previousVideo) ?? 0;
-      const secondItemObserver = observers.find(
-        (observer) => observer.element?.dataset.videoShortsIndex === "1"
+      const observer = observers[0];
+      const secondItem = observer.elements.find(
+        (element) => element.dataset.videoShortsIndex === "1"
       );
 
-      secondItemObserver.callback([
+      observer.callback([
         {
           isIntersecting: true,
           intersectionRatio: 0.7,
-          target: secondItemObserver.element,
+          target: secondItem,
         },
       ]);
 
@@ -743,23 +746,24 @@ acceptance("Video Shorts route", function (needs) {
       }
 
       observe(element) {
-        this.element = element;
+        this.elements ??= [];
+        this.elements.push(element);
       }
 
       disconnect() {}
     };
 
     const notifyVisibility = (index, intersectionRatio) => {
-      const observer = observers.find(
-        (candidate) =>
-          candidate.element?.dataset.videoShortsIndex === String(index)
+      const observer = observers[0];
+      const element = observer.elements.find(
+        (candidate) => candidate.dataset.videoShortsIndex === String(index)
       );
 
       observer.callback([
         {
           isIntersecting: intersectionRatio >= 0.6,
           intersectionRatio,
-          target: observer.element,
+          target: element,
         },
       ]);
     };
@@ -816,6 +820,88 @@ acceptance("Video Shorts route", function (needs) {
         delete window.IntersectionObserver;
       }
     }
+  });
+
+  test("handles route shortcuts without pre-focusing the feed", async function (assert) {
+    setupPretender((server, helper) => {
+      server.get("/videos.json", () =>
+        helper.response({
+          items: [1, 2, 3, 4].map((id) => feedItem(id, `Clip ${id}`)),
+          next_cursor: null,
+          scan_limit_reached: false,
+        })
+      );
+    });
+
+    await visit("/videos");
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        key: "ArrowDown",
+      })
+    );
+    document
+      .querySelector(".video-shorts-feed__items")
+      .dispatchEvent(new Event("scrollend"));
+    await settled();
+
+    assert
+      .dom(".video-shorts-feed__viewport")
+      .hasAttribute(
+        "data-active-post-id",
+        "2",
+        "document navigation works without focusing the feed"
+      );
+
+    const input = document.createElement("input");
+    document.body.append(input);
+
+    try {
+      input.focus();
+      input.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          key: "ArrowDown",
+        })
+      );
+      document
+        .querySelector(".video-shorts-feed__items")
+        .dispatchEvent(new Event("scrollend"));
+      await settled();
+
+      assert
+        .dom(".video-shorts-feed__viewport")
+        .hasAttribute(
+          "data-active-post-id",
+          "2",
+          "editable controls are ignored"
+        );
+    } finally {
+      input.remove();
+    }
+
+    document.querySelector(".video-shorts-feed__items").dispatchEvent(
+      new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        key: "ArrowDown",
+      })
+    );
+    document
+      .querySelector(".video-shorts-feed__items")
+      .dispatchEvent(new Event("scrollend"));
+    await settled();
+
+    assert
+      .dom(".video-shorts-feed__viewport")
+      .hasAttribute(
+        "data-active-post-id",
+        "3",
+        "the focused-feed and document handlers do not navigate twice"
+      );
   });
 
   test("queues rapid keyboard navigation before scrolling settles", async function (assert) {
@@ -943,9 +1029,10 @@ acceptance("Video Shorts route", function (needs) {
     resolveCursorRequest();
     await firstNavigation;
     await waitUntil(
-      () => document.querySelectorAll(".video-shorts-item").length === 8
+      () => document.querySelectorAll(".video-shorts-feed__item").length === 8
     );
 
+    assert.dom(".video-shorts-item").exists({ count: 5 });
     assert.dom("[data-post-id='8']").exists();
   });
 
@@ -982,7 +1069,8 @@ acceptance("Video Shorts route", function (needs) {
     await triggerKeyEvent(".video-shorts-feed__items", "keydown", "ArrowDown");
     await waitUntil(() => cursorRequests === 1);
 
-    assert.dom(".video-shorts-item").exists({ count: 7 });
+    assert.dom(".video-shorts-feed__item").exists({ count: 7 });
+    assert.dom(".video-shorts-item").exists({ count: 4 });
     assert
       .dom(".video-shorts-error")
       .doesNotExist("automatic continuation does not interrupt playback");
@@ -1202,7 +1290,8 @@ acceptance("Video Shorts route", function (needs) {
       .dom('.video-shorts-embed-player iframe[src*="player.bilibili.com"]')
       .doesNotExist();
     assert.dom(".video-shorts-embed-player__fallback").doesNotExist();
-    assert.dom(".video-shorts-item__media-placeholder").exists({ count: 3 });
+    assert.dom(".video-shorts-item__media-placeholder").exists({ count: 2 });
+    assert.dom(".video-shorts-feed__item-placeholder").exists({ count: 1 });
 
     await triggerKeyEvent(".video-shorts-feed__items", "keydown", "ArrowDown");
     await waitUntil(
@@ -1281,6 +1370,82 @@ acceptance("Video Shorts route", function (needs) {
 acceptance("Video Shorts native actions", function (needs) {
   needs.settings({ video_shorts_enabled: true });
   needs.user();
+
+  test("Bilibili exposes the complete native Discourse action rail", async function (assert) {
+    const actions = {
+      liked: false,
+      can_like: true,
+      bookmarked: false,
+      bookmark_id: null,
+      can_bookmark: true,
+      can_flag: true,
+      can_reply: true,
+      share_url: "/t/bilibili-video/1/1",
+    };
+
+    setupPretender((server, helper) => {
+      server.get("/videos.json", () =>
+        helper.response({
+          items: [
+            feedItem(
+              1,
+              "Bilibili action clip",
+              {
+                provider: "bilibili",
+                renderability: "iframe_candidate",
+                embed_url:
+                  "https://player.bilibili.com/player.html?bvid=BV1Q541167Qg&page=1",
+                dedupe_key: "bilibili:BV1Q541167Qg:page:1",
+              },
+              actions
+            ),
+          ],
+          next_cursor: null,
+          scan_limit_reached: false,
+        })
+      );
+    });
+
+    await visit("/videos");
+
+    for (const action of [
+      "like",
+      "bookmark",
+      "open-comments",
+      "share",
+      "flag",
+      "open-topic",
+    ]) {
+      assert
+        .dom(`.video-shorts-action-rail [data-action="${action}"]`)
+        .isVisible(`${action} uses the native Discourse action surface`);
+    }
+  });
+
+  test("ignores legacy publisher channel fields", async function (assert) {
+    const item = feedItem(1, "Legacy channel field");
+    item.publisher_channel_url =
+      "https://www.youtube.com/@video.publisher";
+
+    setupPretender((server, helper) => {
+      server.get("/videos.json", () =>
+        helper.response({
+          items: [item],
+          next_cursor: null,
+          scan_limit_reached: false,
+        })
+      );
+    });
+
+    await visit("/videos");
+
+    assert
+      .dom('.video-shorts-action-rail [data-action="open-channel"]')
+      .doesNotExist();
+    assert
+      .dom('.video-shorts-action-rail [data-action="open-topic"]')
+      .isVisible("topic navigation remains available");
+  });
 
   test("like and bookmark use native Discourse endpoints", async function (assert) {
     const actions = {

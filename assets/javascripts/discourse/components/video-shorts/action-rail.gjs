@@ -13,7 +13,6 @@ import PostFlag from "discourse/lib/flag-targets/post-flag";
 import { not } from "discourse/truth-helpers";
 import dIcon from "discourse/ui-kit/helpers/d-icon";
 import { i18n } from "discourse-i18n";
-import VideoShortsCommentsSheet from "discourse/plugins/discourse-video-shorts/discourse/components/modal/video-shorts-comments-sheet";
 import { videoShortsNativePost } from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-native-post";
 import { createVideoShortsNativeTopic } from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-native-topic";
 
@@ -293,7 +292,7 @@ export default class VideoShortsActionRail extends Component {
   }
 
   @action
-  openComments(event) {
+  async openComments(event) {
     event?.preventDefault();
 
     if (this.args.onOpenComments) {
@@ -303,7 +302,11 @@ export default class VideoShortsActionRail extends Component {
       return;
     }
 
-    this.modal.show(VideoShortsCommentsSheet, {
+    const { default: CommentsSheetComponent } = await import(
+      "discourse/plugins/discourse-video-shorts/discourse/components/modal/video-shorts-comments-sheet"
+    );
+
+    this.modal.show(CommentsSheetComponent, {
       model: {
         item: this.args.item,
         replyCount: () =>
@@ -383,6 +386,8 @@ export default class VideoShortsActionRail extends Component {
         class="video-shorts-action-rail__button"
         data-action="open-comments"
         aria-label={{i18n "video_shorts.actions.open_comments"}}
+        aria-expanded={{if @commentsOpen "true" "false"}}
+        aria-controls={{@commentsPanelId}}
         {{on "click" this.openComments}}
       >
         {{dIcon "reply"}}

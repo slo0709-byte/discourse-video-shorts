@@ -6,7 +6,7 @@ Discourse plugin that adds a fixed `/videos` page and `/videos.json` feed for a 
 
 `/videos` is a Discourse-compatible vertical short-video feed. On desktop, it uses a YouTube Shorts-style structure inside the normal Discourse shell: a centered 9:16 player, an adjacent action rail, and an expandable right comments/context panel. On mobile, it becomes a route-scoped fullscreen player that hides Discourse chrome only while the viewer stays on `/videos`, with the action rail overlaid on the right side and comments opening as a bottom sheet.
 
-The page is not an ordinary 16:9 video list and it is not an exact YouTube or TikTok clone. Metadata stays on the player stage, but likes, bookmarks, replies, shares, flags, and topic navigation continue to use Discourse-native behavior and permissions.
+The page is not an ordinary 16:9 video list and it is not an exact YouTube clone. Metadata stays on the player stage, but likes, bookmarks, replies, shares, flags, and topic navigation continue to use Discourse-native behavior and permissions.
 
 Comments open in context instead of navigating away from `/videos`. Desktop uses the right comments/context panel; mobile uses the bottom sheet. The initial list contains direct replies to the source video post, while expandable, paginated branches load nested replies on demand. It is not a full topic timeline. Publishing, replying to, and editing eligible comments all stay inside the panel/sheet and preserve the active video. Anonymous write attempts use the native login flow without opening the topic route.
 
@@ -42,9 +42,11 @@ Enable and configure the feed from site settings:
 Source matching is topic-level OR semantics: a post is eligible when its topic matches any configured source category or any configured source tag. Replies inherit their topic category and tags for source matching.
 
 Provider switches are applied after media classification and before feed
-serialization. Native uploads, HLS, Vimeo, original topic routes, and Discourse
-oneboxes are unaffected. Changing a provider switch invalidates existing feed
-cursors so pagination cannot mix two platform configurations.
+serialization. Each provider switch affects only whether matching items enter
+the Shorts feed. Native uploads, HLS, Vimeo, original topic routes, Discourse
+comments, and Discourse oneboxes/embeds are unaffected. Changing a provider
+switch invalidates existing feed cursors so pagination cannot mix two platform
+configurations.
 
 ## Admin
 
@@ -92,9 +94,9 @@ Provider links and cooked embeds:
 - Raw YouTube page URLs normalized to YouTube embed URLs
 - Raw Vimeo page URLs as known-provider fallbacks
 
-Current provider contract is allowlist-based: trusted YouTube, Bilibili, and Vimeo embeds are serialized as `renderability: "iframe_candidate"` with a sanitized HTTPS `embed_url`, then revalidated in the browser before an iframe is rendered. Unsupported, malformed, non-HTTPS, or non-allowlisted provider URLs render a labeled topic fallback when their item is active. `b23.tv` expansion is out of scope for v1.
+Current provider contract is allowlist-based: trusted YouTube, Bilibili, and Vimeo embeds are serialized as `renderability: "iframe_candidate"` with a sanitized HTTPS `embed_url`, then revalidated in the browser before an iframe is rendered. Unsupported, malformed, non-HTTPS, or non-allowlisted provider URLs render a labeled topic fallback when their item is active. The YouTube and Bilibili official players keep their native progress and playback controls available.
 
-The plugin extends Discourse CSP with exact `frame-src` entries for YouTube, YouTube NoCookie, `player.bilibili.com`, `www.bilibili.com`, and Vimeo. Its `media-src` policy allows self-hosted media, blobs, HTTPS HLS sources, configured origins, and the active Discourse CDN origins.
+The plugin extends Discourse CSP with exact `frame-src` entries for `self`, `https://www.youtube.com`, `https://www.youtube-nocookie.com`, `https://player.bilibili.com`, `https://www.bilibili.com`, and `https://player.vimeo.com`. Its `media-src` policy allows self-hosted media, blobs, HTTPS HLS sources, configured origins, and the active Discourse CDN origins.
 
 ## Native Actions
 

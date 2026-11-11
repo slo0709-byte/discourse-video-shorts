@@ -348,6 +348,30 @@ RSpec.describe "Discourse video shorts feed" do
     expect(item["media"]).not_to have_key("fallback")
   end
 
+  it "omits TikTok and Douyin posts while keeping supported video providers" do
+    category = Fabricate(:category)
+    tiktok_post =
+      make_text_post(
+        category: category,
+        raw:
+          "https://www.tiktok.com/@scout2015/video/6718335390845095173?tracking=secret",
+      )
+    douyin_post =
+      make_text_post(
+        category: category,
+        raw: "https://www.douyin.com/video/7380000000000000001?tracking=secret",
+      )
+    youtube_post =
+      make_text_post(category: category, raw: "https://www.youtube.com/shorts/dQw4w9WgXcQ")
+    SiteSetting.video_shorts_source_category_ids = category.id.to_s
+
+    get "/videos.json"
+
+    post_ids = response.parsed_body["items"].pluck("post_id")
+    expect(post_ids).to include(youtube_post.id)
+    expect(post_ids).not_to include(tiktok_post.id, douyin_post.id)
+  end
+
   it "excludes YouTube only from the Shorts feed when YouTube support is disabled" do
     category = Fabricate(:category)
     youtube_post =

@@ -1865,10 +1865,17 @@ export default class VideoShortsCommentsSurface extends Component {
   }
 
   @action
-  recoverNativePost(post) {
-    return post.recover().then(() => {
-      return this.refreshCommentsAfterMutation();
-    });
+  async recoverNativePost(post) {
+    const token = this.loadToken;
+    const itemIdentity = this.currentItemIdentity();
+
+    await post.recover();
+
+    if (this.isStale(token, itemIdentity)) {
+      return;
+    }
+
+    return this.refreshCommentsAfterMutation();
   }
 
   @action
@@ -1880,13 +1887,23 @@ export default class VideoShortsCommentsSurface extends Component {
     this.dialog.yesNoConfirm({
       message: i18n("post.confirm_delete"),
       didConfirm: async () => {
+        const token = this.loadToken;
+        const itemIdentity = this.currentItemIdentity();
         const comment = this.findCommentByPostId(post.id);
         const snapshot = comment
           ? await this.childrenSnapshotForDelete(comment)
           : { children: [], pagination: null };
 
+        if (this.isStale(token, itemIdentity)) {
+          return;
+        }
+
         try {
           await post.destroy(this.currentUser);
+
+          if (this.isStale(token, itemIdentity)) {
+            return;
+          }
 
           if (comment) {
             const mutation = this.removeComment(comment, {
@@ -1898,8 +1915,10 @@ export default class VideoShortsCommentsSurface extends Component {
             await this.refreshCommentsAfterMutation();
           }
         } catch (error) {
-          post.undoDeleteState();
-          popupAjaxError(error);
+          if (!this.isStale(token, itemIdentity)) {
+            post.undoDeleteState();
+            popupAjaxError(error);
+          }
         }
       },
     });

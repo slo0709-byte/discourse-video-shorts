@@ -111,6 +111,7 @@ Rules:
 - Cross-page duplicate media is allowed in v1.
 - Native upload URLs are emitted only after post visibility is confirmed and through current Discourse URL helpers.
 - Provider media includes `embed_url` only when `renderability` is `iframe_candidate` and the server has normalized it to a trusted HTTPS allowlisted provider URL. Fallback provider media must not include `embed_url`.
+- Provider switches for YouTube and Bilibili are independent Shorts-feed filters. Disabling one removes only that provider's items from `/videos.json`; it does not edit, hide, or replace original Discourse topics, comments, or embeds.
 - `native_action_summary` mirrors Discourse `PostSerializer#actions_summary` for native post action flows such as like and flag/report; clients must treat action ids as Discourse-provided values, not plugin-defined enums.
 - `counts.reply_count` is the count of visible comments under the video item, not only the direct `Post#reply_count`: OP video posts count visible topic comments excluding the source post; non-OP video posts count visible descendants through `PostReply`. Hidden, deleted, or inaccessible replies are excluded.
 
@@ -123,6 +124,7 @@ Rules:
 - Metadata stays inside `.video-shorts-item__stage`.
 - Native videos are active-only. Offscreen native items render placeholders and do not keep mounted `<video>` elements.
 - Provider `iframe_candidate` media is active-only and renders only after the browser revalidates provider, protocol, host, and path. Offscreen provider items render placeholders and do not keep mounted iframes.
+- Active provider iframes must use sanitized official player URLs only: YouTube embed, Bilibili player, or Vimeo player.
 - Unsupported or unsafe provider media renders a fallback topic link when the item is active.
 - The right comments panel and bottom sheet own their scroll containers. Feed keyboard shortcuts are ignored while focus is inside comments, dialogs, or reply inputs.
 - Reduced-motion preference keeps feed scroll behavior non-animated.

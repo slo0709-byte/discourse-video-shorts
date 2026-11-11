@@ -11,9 +11,15 @@ zh_CN:
         open_topic: "打开话题"
       feed:
         item_aria: "%{title}，@%{username}，第 %{position} 个，共 %{total} 个"
+        navigation: "短视频导航"
+        previous: "上一条视频"
+        next: "下一条视频"
       player:
         mute: "静音"
         unmute: "打开声音"
+        loading: "正在加载视频…"
+        load_error: "视频加载失败"
+        retry: "重试"
       metadata:
         expand_excerpt: "展开"
         collapse_excerpt: "收起"
@@ -41,10 +47,10 @@ zh_CN:
         replies_error: "无法加载回复"
         retry_replies: "重试加载回复"
         empty: "还没有评论"
-        add_comment: "添加评论..."
+        add_comment: "添加评论…"
         count:
-          one: "%{count} 条回复"
-          other: "%{count} 条回复"
+          one: "%{count} 条评论"
+          other: "%{count} 条评论"
         replying_to: "正在回复 %{username}"
         reply_to: "回复"
         reply_empty: "回复不能为空"

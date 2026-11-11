@@ -6,7 +6,8 @@ module DiscourseVideoShorts
       DEFAULT_SAMPLE_SIZE = 10
       MAX_SAMPLE_SIZE = 25
       MAX_SCAN_LIMIT = 1000
-      PROVIDER_BUCKETS = %w[native hls youtube bilibili vimeo fallback unsupported unknown].freeze
+      PROVIDER_BUCKETS =
+        %w[native hls youtube bilibili vimeo fallback unsupported unknown].freeze
       RENDERABILITY_BUCKETS = %w[native hls iframe_candidate fallback unknown].freeze
 
       def initialize(guardian:, sample_size: nil, scan_limit: nil)

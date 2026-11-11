@@ -1,6 +1,7 @@
 import {
   click,
   currentURL,
+  settled,
   triggerKeyEvent,
   visit,
   waitUntil,
@@ -826,8 +827,8 @@ acceptance("Video Shorts refined layout contract", function (needs) {
     const desktopInfoRules = desktopRuleTextsFor((selectorText) =>
       selectorText.includes(".video-shorts-item__info"),
     );
-    const desktopInfoMarginRules = desktopInfoRules.filter((cssText) =>
-      cssText.includes("margin:"),
+    const desktopInfoBottomRules = desktopInfoRules.filter((cssText) =>
+      cssText.includes("bottom:"),
     );
     const rail = item.querySelector(".video-shorts-action-rail");
     const railStyle = getComputedStyle(rail);
@@ -933,53 +934,57 @@ acceptance("Video Shorts refined layout contract", function (needs) {
       youtubeProviderRules.some(
         (cssText) =>
           cssText.includes(
-            "--video-shorts-mobile-metadata-controls-reserve: 7.5rem",
+            "--video-shorts-mobile-metadata-controls-reserve: 6.5rem",
           ) &&
           cssText.includes(
-            "--video-shorts-mobile-rail-controls-reserve: 7.5rem",
+            "--video-shorts-mobile-rail-controls-reserve: 6.5rem",
           ),
       ),
-      "YouTube reserves its measured elevated progress and bottom-control band",
+      "YouTube keeps its measured elevated progress and bottom-control band while moving host chrome down",
     );
     assert.true(
       bilibiliProviderRules.some(
         (cssText) =>
           cssText.includes(
-            "--video-shorts-mobile-metadata-controls-reserve: 4rem",
+            "--video-shorts-mobile-metadata-controls-reserve: 3rem",
           ) &&
           cssText.includes(
-            "--video-shorts-mobile-rail-controls-reserve: 3.25rem",
+            "--video-shorts-mobile-rail-controls-reserve: 2.5rem",
           ),
       ),
-      "Bilibili metadata adds breathing room above its 44px control bar while the rail keeps the measured reserve",
+      "Bilibili metadata and rail move down within their smaller native control reserve",
     );
     assert.true(
       desktopYoutubeProviderRules.some((cssText) =>
         cssText.includes(
           "--video-shorts-desktop-metadata-controls-reserve: 7.5rem",
-        ),
+        ) &&
+        cssText.includes("--video-shorts-action-bottom-clearance: 1.5rem"),
       ),
-      "desktop YouTube metadata clears its elevated progress and control band",
+      "desktop YouTube metadata and action rail use independent control reserves",
     );
     assert.true(
       desktopBilibiliProviderRules.some((cssText) =>
         cssText.includes(
           "--video-shorts-desktop-metadata-controls-reserve: 3.25rem",
-        ),
+        ) &&
+        cssText.includes("--video-shorts-action-bottom-clearance: 1rem"),
       ),
-      "desktop Bilibili metadata clears its independent bottom control bar",
+      "desktop Bilibili metadata and action rail use independent control reserves",
     );
     assert.true(
-      desktopInfoMarginRules.length >= 2,
-      "desktop metadata has margin rules with comments open or closed",
+      desktopInfoBottomRules.length >= 2,
+      "desktop metadata has stage-relative bottom rules with comments open or closed",
     );
     assert.true(
-      desktopInfoMarginRules.every((cssText) =>
-        cssText.includes(
-          "--video-shorts-desktop-metadata-controls-reserve",
-        ),
+      desktopInfoBottomRules.every(
+        (cssText) =>
+          cssText.includes("--video-shorts-desktop-stage-height") &&
+          cssText.includes(
+            "--video-shorts-desktop-metadata-controls-reserve",
+          ),
       ),
-      "every desktop metadata margin consumes the provider reserve",
+      "every desktop metadata position combines stage geometry with its provider reserve",
     );
     assert.true(
       railStyle.zIndex > infoStyle.zIndex,
@@ -1155,12 +1160,17 @@ acceptance("Video Shorts refined layout contract", function (needs) {
     });
 
     await visit("/videos");
-    await click('[data-post-id="601"] [data-action="open-comments"]');
+    const commentsTrigger = document.querySelector(
+      '[data-post-id="601"] [data-action="open-comments"]',
+    );
+    await click(commentsTrigger);
 
     assert
       .dom(".video-shorts-feed__viewport")
       .hasAttribute("data-active-post-id", "601");
-    assert.dom(".video-shorts-comments-panel").exists();
+    assert
+      .dom(".video-shorts-comments-panel")
+      .hasAttribute("id", "video-shorts-comments-panel");
 
     document.querySelector(".video-shorts-comments-panel__body").focus();
     await triggerKeyEvent(
@@ -1177,7 +1187,14 @@ acceptance("Video Shorts refined layout contract", function (needs) {
         "feed shortcuts are ignored while focus is inside comments",
       );
 
-    await click('[data-action="close-comments"]');
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        key: "Escape",
+      }),
+    );
+    await settled();
 
     assert.dom(".video-shorts-comments-panel").doesNotExist();
     assert
@@ -1192,8 +1209,8 @@ acceptance("Video Shorts refined layout contract", function (needs) {
       );
     assert.strictEqual(
       document.activeElement,
-      document.querySelector(".video-shorts-feed__items"),
-      "feed item container receives focus after close",
+      commentsTrigger,
+      "route Escape restores focus to the open-comments trigger",
     );
 
     await triggerKeyEvent(".video-shorts-feed__items", "keydown", "ArrowDown");

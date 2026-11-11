@@ -21,6 +21,8 @@ theme instead of introducing a separate brand palette.
 | Muted text         | Discourse `--primary-medium`        | active theme                                          | Counts and secondary copy          |
 | Interactive accent | Discourse `--tertiary`              | active theme                                          | Focus and selected action state    |
 | Border             | Discourse `--primary-low`           | active theme                                          | Comments and continuation surfaces |
+| Desktop control    | Discourse `--secondary`             | active theme                                          | PC action-button surface           |
+| Desktop hover      | Discourse `--primary-very-low`      | active theme                                          | PC action-button hover surface     |
 | Form control       | Discourse `--d-input-*` tokens      | active theme                                          | Reply and edit fields               |
 | Error              | Discourse `--danger`                | active theme                                          | Inline failures                    |
 
@@ -39,10 +41,10 @@ theme instead of introducing a separate brand palette.
 
 | Level       | Token / value                               | Usage                        |
 | ----------- | ------------------------------------------- | ---------------------------- |
-| Title       | Discourse `--font-up-2`                     | Video title                  |
+| Title       | Discourse `--font-up-1` on desktop          | Video title                  |
 | Panel title | Discourse `--font-up-1`                     | Comments heading             |
 | Body        | inherited Discourse font and size           | Metadata, controls, editor   |
-| Secondary   | Discourse `--font-down-1`                   | Comment text and helper copy |
+| Secondary   | Discourse `--font-down-1`                   | Author, excerpt, comment text |
 | Count       | Discourse `--font-down-2`, tabular numerals | Action counts                |
 
 ### Font Stack
@@ -86,6 +88,19 @@ Spacing follows a `0.25rem` (4px at the default root size) base.
 | `--video-shorts-desktop-rail-width`                  | `3.75rem`  | Dedicated action-rail grid column                 |
 | `--video-shorts-desktop-stage-rail-gap`              | `1rem`     | Stage-to-rail separation                          |
 
+### Desktop visual chrome
+
+- The PC stage uses a one-pixel `--primary-low` border and a theme-derived
+  shadow so its edge remains visible in light and dark themes.
+- PC action buttons use `--secondary` surfaces, `--primary-low` borders,
+  `--primary-very-low` hover surfaces, and `--tertiary` for active state.
+- Desktop metadata follows the 4px spacing rhythm: 12px inset, 4px author gap,
+  and 6px title gap. Its media backing remains translucent black because theme
+  foreground colors cannot guarantee contrast over arbitrary video frames;
+  the thin accent edge uses `--tertiary`.
+- Mobile typography, spacing, transparent action chrome, and provider safety
+  reserves remain unchanged.
+
 All desktop geometry tokens resolve to multiples of the 4px base unit. Both
 the route-shell layer and the component layer consume the same tokens so a
 theme or layout adjustment cannot desynchronize the stage and action rail.
@@ -97,8 +112,8 @@ theme or layout adjustment cannot desynchronize the stage and action rail.
 | YouTube   | `7.5rem / 7.5rem`      | `7.5rem`         | Mobile drag target occupies the band 52–96px above the stage bottom; bottom controls begin about 126px above it |
 | Bilibili  | `4rem / 3.25rem`       | `3.25rem`        | Mobile control bar is 44px tall and the progress line sits about 21–23px above the stage bottom; metadata keeps an extra 0.75rem visual buffer |
 
-These reserves apply only to trusted provider iframes. Native and HLS media keep
-their existing overlay placement. Metadata clears provider controls at every
+These reserves apply only to trusted provider iframes. Native and HLS media
+keep their existing overlay placement. Metadata clears provider controls at every
 breakpoint; the mobile action rail consumes its own named reserve while the
 desktop rail remains outside the stage.
 
@@ -159,8 +174,8 @@ desktop rail remains outside the stage.
   attempts to forward cross-origin progress gestures.
 - **Admin capability contract**: native Discourse site settings independently
   control whether YouTube and Bilibili items enter the Shorts feed. Disabling a
-  provider never edits, hides, or replaces its original Discourse topic or
-  native onebox/embed.
+  provider never edits, hides, or replaces its original Discourse topic,
+  comments, or native onebox/embed.
 
 ### Action rail
 
@@ -177,7 +192,7 @@ desktop rail remains outside the stage.
 - **Layout**: vertical `stack`.
 - **Provider controls**: metadata ends above the measured YouTube or Bilibili
   control band at every breakpoint. On mobile, the rail also ends above that
-  band instead of occupying the embedded progress area.
+  provider's own band instead of occupying the embedded progress area.
 - **Mobile comments state**: while the bottom sheet is open, the background rail
   is non-painted and non-interactive until the sheet closes; the desktop rail
   remains visible beside its comments panel.

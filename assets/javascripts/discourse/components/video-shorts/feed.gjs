@@ -1,5 +1,6 @@
 import Component from "@glimmer/component";
 import { tracked } from "@glimmer/tracking";
+import { warn } from "@ember/debug";
 import { isDestroyed, isDestroying } from "@ember/destroyable";
 import { on } from "@ember/modifier";
 import { action } from "@ember/object";
@@ -7,15 +8,17 @@ import { scheduleOnce } from "@ember/runloop";
 import { service } from "@ember/service";
 import { modifier } from "ember-modifier";
 import { ajax } from "discourse/lib/ajax";
-import { eq } from "discourse/truth-helpers";
+import { eq, not } from "discourse/truth-helpers";
 import dIcon from "discourse/ui-kit/helpers/d-icon";
 import { i18n } from "discourse-i18n";
-import VideoShortsCommentsSheet from "discourse/plugins/discourse-video-shorts/discourse/components/modal/video-shorts-comments-sheet";
-import VideoShortsCommentsSurface from "discourse/plugins/discourse-video-shorts/discourse/components/video-shorts/comments-surface";
 import {
   createVideoShortsCommentCountFetcher,
   createVideoShortsCommentCountSync,
 } from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-comment-count";
+import {
+  videoShortsFeedKeyAction,
+  videoShortsItemIsMounted,
+} from "discourse/plugins/discourse-video-shorts/discourse/lib/video-shorts-feed-window";
 import {
   createVideoShortsRealtimeCommentsLedger,
   gateVideoShortsRealtimeComment,
@@ -38,6 +41,7 @@ export default class VideoShortsFeed extends Component {
   @tracked isDesktopLayout = false;
   @tracked mediaMuted = true;
   @tracked replyCountOverrides = {};
+  @tracked CommentsSurfaceComponent = null;
   lastAppliedInitialActivePostId = null;
   restoringInitialActivePostId = false;
   commentCountSync = null;
@@ -48,6 +52,44 @@ export default class VideoShortsFeed extends Component {
   feedItemsElement = null;
   centerFrame = null;
   focusFrame = null;
+  visibilityObserver = null;
+  observedVisibilityItems = new Map();
+  commentsTriggerElement = null;
+  commentsSurfaceRequest = null;
+  commentsSheetRequest = null;
+  commentsOpenRequestId = 0;
+
+  loadCommentsSurface = () => {
+    this.commentsSurfaceRequest ??= import(
+      "discourse/plugins/discourse-video-shorts/discourse/components/video-shorts/comments-surface"
+    )
+      .then(({ default: CommentsSurfaceComponent }) => {
+        if (!isDestroying(this) && !isDestroyed(this)) {
+          this.CommentsSurfaceComponent = CommentsSurfaceComponent;
+        }
+
+        return CommentsSurfaceComponent;
+      })
+      .catch((error) => {
+        this.commentsSurfaceRequest = null;
+        throw error;
+      });
+
+    return this.commentsSurfaceRequest;
+  };
+
+  loadCommentsSheet = () => {
+    this.commentsSheetRequest ??= import(
+      "discourse/plugins/discourse-video-shorts/discourse/components/modal/video-shorts-comments-sheet"
+    )
+      .then(({ default: CommentsSheetComponent }) => CommentsSheetComponent)
+      .catch((error) => {
+        this.commentsSheetRequest = null;
+        throw error;
+      });
+
+    return this.commentsSheetRequest;
+  };
 
   trackLayoutMode = modifier(() => {
     const query = window.matchMedia("(min-width: 1024px)");
@@ -151,6 +193,20 @@ export default class VideoShortsFeed extends Component {
     };
   });
 
+  manageDocumentKeyboard = modifier(() => {
+    const handleDocumentKeydown = (event) => {
+      if (!event.defaultPrevented) {
+        this.handleKeydown(event);
+      }
+    };
+
+    document.addEventListener("keydown", handleDocumentKeydown);
+
+    return () => {
+      document.removeEventListener("keydown", handleDocumentKeydown);
+    };
+  });
+
   manageMobileComposerEscape = modifier(() => {
     const closeComposerBeforeSheet = (event) => {
       if (
@@ -220,33 +276,26 @@ export default class VideoShortsFeed extends Component {
       return () => {};
     }
 
-    const root = element.closest(".video-shorts-feed__items");
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (this.restoringInitialActivePostId && index !== this.activeIndex) {
-          return;
-        }
+    if (!this.visibilityObserver) {
+      const root = element.closest(".video-shorts-feed__items");
+      this.visibilityObserver = new IntersectionObserver(
+        this.handleVisibilityEntries,
+        { root, threshold: [0.6] }
+      );
+    }
 
-        if (entry.isIntersecting && entry.intersectionRatio >= 0.6) {
-          this.visibleItemRatios.set(index, entry.intersectionRatio);
-        } else {
-          this.visibleItemRatios.delete(index);
-        }
-
-        this.pendingActiveIndex = this.mostVisibleItemIndex();
-        if (this.pendingActiveIndex !== null) {
-          this.setPlaybackIndex(this.pendingActiveIndex);
-        }
-        this.schedulePendingActiveCommit();
-      },
-      { root, threshold: [0.6] }
-    );
-
-    observer.observe(element);
+    this.observedVisibilityItems.set(element, index);
+    this.visibilityObserver.observe(element);
 
     return () => {
-      observer.disconnect();
+      this.visibilityObserver?.unobserve?.(element);
+      this.observedVisibilityItems.delete(element);
       this.visibleItemRatios.delete(index);
+
+      if (this.observedVisibilityItems.size === 0) {
+        this.visibilityObserver?.disconnect();
+        this.visibilityObserver = null;
+      }
     };
   });
 
@@ -288,6 +337,14 @@ export default class VideoShortsFeed extends Component {
     );
   };
 
+  isItemMounted = (index) => {
+    return videoShortsItemIsMounted(index, this.activeIndex);
+  };
+
+  isItemInert = (index) => {
+    return !this.isItemMounted(index);
+  };
+
   replyCountFor = (item) => {
     if (!item) {
       return 0;
@@ -309,6 +366,41 @@ export default class VideoShortsFeed extends Component {
       position: this.itemPosition(index),
       total: this.args.items?.length || 0,
     });
+  };
+
+  commentsRequestIsCurrent = (requestId, item) => {
+    return (
+      requestId === this.commentsOpenRequestId &&
+      this.commentsOpen &&
+      String(item?.post_id) === String(this.selectedCommentsItem?.post_id) &&
+      !isDestroying(this) &&
+      !isDestroyed(this)
+    );
+  };
+
+  handleVisibilityEntries = (entries) => {
+    for (const entry of entries) {
+      const index = this.observedVisibilityItems.get(entry.target);
+
+      if (
+        index === undefined ||
+        (this.restoringInitialActivePostId && index !== this.activeIndex)
+      ) {
+        continue;
+      }
+
+      if (entry.isIntersecting && entry.intersectionRatio >= 0.6) {
+        this.visibleItemRatios.set(index, entry.intersectionRatio);
+      } else {
+        this.visibleItemRatios.delete(index);
+      }
+    }
+
+    this.pendingActiveIndex = this.mostVisibleItemIndex();
+    if (this.pendingActiveIndex !== null) {
+      this.setPlaybackIndex(this.pendingActiveIndex);
+    }
+    this.schedulePendingActiveCommit();
   };
 
   constructor(owner, args) {
@@ -539,7 +631,7 @@ export default class VideoShortsFeed extends Component {
   focusIsInsideIgnoredSurface(target) {
     return Boolean(
       target?.closest(
-        "input, textarea, select, [contenteditable='true'], [role='dialog'], [role='menu'], .modal, .composer-popup, #reply-control"
+        "input, textarea, select, button, a[href], [role='button'], [role='link'], [contenteditable]:not([contenteditable='false']), [role='dialog'], [role='menu'], .modal, .composer-popup, #reply-control"
       )
     );
   }
@@ -623,6 +715,24 @@ export default class VideoShortsFeed extends Component {
     });
   }
 
+  get hasPreviousItem() {
+    return this.activeIndex > 0;
+  }
+
+  get hasNextItem() {
+    return this.activeIndex < (this.args.items?.length || 1) - 1;
+  }
+
+  @action
+  showPreviousItem() {
+    this.moveActiveIndex(-1);
+  }
+
+  @action
+  showNextItem() {
+    this.moveActiveIndex(1);
+  }
+
   moveActiveIndex(direction) {
     this.restoringInitialActivePostId = false;
     const navigationIndex = this.pendingActiveIndex ?? this.activeIndex;
@@ -644,9 +754,20 @@ export default class VideoShortsFeed extends Component {
   }
 
   @action
-  openComments({ item }) {
+  async openComments({ item }) {
+    const requestId = ++this.commentsOpenRequestId;
+
     this.clearFocusFrame();
     const itemIndex = this.indexForPostId(item?.post_id);
+    const focusedTrigger = document.activeElement?.closest?.(
+      '[data-action="open-comments"]'
+    );
+    this.commentsTriggerElement =
+      focusedTrigger ??
+      this.feedItemsElement
+        ?.querySelector(`[data-video-shorts-index="${itemIndex}"]`)
+        ?.querySelector('[data-action="open-comments"]') ??
+      null;
 
     if (
       this.isDesktopLayout &&
@@ -659,25 +780,70 @@ export default class VideoShortsFeed extends Component {
     this.commentsOpen = true;
     this.selectedCommentsItem = item;
 
-    if (this.isDesktopLayout) {
+    try {
+      if (this.isDesktopLayout) {
+        await this.loadCommentsSurface();
+
+        if (!this.commentsRequestIsCurrent(requestId, item)) {
+          return;
+        }
+
+        this.clearFocusFrame();
+        this.focusFrame = requestAnimationFrame(() => {
+          this.focusFrame = null;
+
+          if (this.commentsRequestIsCurrent(requestId, item)) {
+            document
+              .querySelector(
+                "#video-shorts-comments-panel .video-shorts-comments-panel__body"
+              )
+              ?.focus({ preventScroll: true });
+          }
+        });
+        return;
+      }
+
+      const CommentsSheetComponent = await this.loadCommentsSheet();
+
+      if (!this.commentsRequestIsCurrent(requestId, item)) {
+        return;
+      }
+
+      this.modal.show(CommentsSheetComponent, {
+        model: {
+          item,
+          replyCount: () => this.replyCountFor(item),
+          onCommentMutation: (mutation) =>
+            this.handleCommentMutation(item, mutation),
+          onClose: this.closeComments,
+        },
+      });
+    } catch (error) {
+      if (this.commentsRequestIsCurrent(requestId, item)) {
+        this.commentsOpen = false;
+        this.selectedCommentsItem = null;
+        warn(`Video Shorts comments failed to load: ${error}`, false, {
+          id: "discourse-video-shorts.comments-load-failed",
+        });
+      }
+
       return;
     }
-
-    this.modal.show(VideoShortsCommentsSheet, {
-      model: {
-        item,
-        replyCount: () => this.replyCountFor(item),
-        onCommentMutation: (mutation) =>
-          this.handleCommentMutation(item, mutation),
-        onClose: this.closeComments,
-      },
-    });
   }
 
   @action
-  closeComments() {
+  closeComments(options = {}) {
+    this.commentsOpenRequestId += 1;
+    const restoreTrigger = options?.restoreTrigger ?? this.isDesktopLayout;
+    const focusTarget = restoreTrigger
+      ? (this.feedItemsElement?.querySelector(
+          `${this.activeItemSelector} [data-action="open-comments"]`
+        ) ?? this.commentsTriggerElement)
+      : this.feedItemsElement;
+
     this.commentsOpen = false;
     this.selectedCommentsItem = null;
+    this.commentsTriggerElement = null;
 
     this.clearFocusFrame();
     this.focusFrame = requestAnimationFrame(() => {
@@ -687,9 +853,9 @@ export default class VideoShortsFeed extends Component {
         !this.commentsOpen &&
         !isDestroying(this) &&
         !isDestroyed(this) &&
-        this.feedItemsElement?.isConnected
+        focusTarget?.isConnected
       ) {
-        this.feedItemsElement.focus({ preventScroll: true });
+        focusTarget.focus({ preventScroll: true });
       }
     });
   }
@@ -755,31 +921,42 @@ export default class VideoShortsFeed extends Component {
 
   @action
   handleKeydown(event) {
-    if (this.focusIsInsideIgnoredSurface(event.target)) {
+    if (
+      event.defaultPrevented ||
+      this.focusIsInsideIgnoredSurface(event.target)
+    ) {
       return;
     }
 
-    if (event.key === " " || event.key === "Spacebar") {
+    const keyAction = videoShortsFeedKeyAction(event.key);
+
+    if (keyAction === "toggle-playback") {
       event.preventDefault();
       this.togglePlayback();
       return;
     }
 
-    if (event.key === "m" || event.key === "M") {
+    if (keyAction === "toggle-mute") {
       event.preventDefault();
       this.toggleMute();
       return;
     }
 
-    if (event.key === "ArrowDown" || event.key === "j" || event.key === "J") {
+    if (keyAction === "next") {
       event.preventDefault();
       this.moveActiveIndex(1);
       return;
     }
 
-    if (event.key === "ArrowUp" || event.key === "k" || event.key === "K") {
+    if (keyAction === "previous") {
       event.preventDefault();
       this.moveActiveIndex(-1);
+      return;
+    }
+
+    if (keyAction === "escape" && this.showDesktopCommentsPanel) {
+      event.preventDefault();
+      this.closeComments({ restoreTrigger: true });
     }
   }
 
@@ -799,6 +976,7 @@ export default class VideoShortsFeed extends Component {
       }}
       {{this.refreshCommentCountOnReconnect}}
       {{this.manageMobileComposerEscape}}
+      {{this.manageDocumentKeyboard}}
     >
       <ol
         class="video-shorts-feed__items"
@@ -814,24 +992,69 @@ export default class VideoShortsFeed extends Component {
             data-video-shorts-index={{index}}
             data-post-id={{item.post_id}}
             aria-current={{if (eq index this.activeIndex) "true"}}
+            aria-hidden={{if (this.isItemInert index) "true"}}
             aria-label={{this.itemAriaLabel item index}}
+            inert={{this.isItemInert index}}
             {{this.trackItemVisibility index}}
           >
-            <VideoShortsItem
-              @item={{item}}
-              @isActive={{eq index this.playbackIndex}}
-              @isMuted={{this.mediaMuted}}
-              @shouldPreload={{this.isWithinPreloadWindow index}}
-              @replyCount={{this.replyCountFor item}}
-              @onOpenComments={{this.openComments}}
-              @onToggleMute={{this.toggleMute}}
-            />
+            {{#if (this.isItemMounted index)}}
+              <VideoShortsItem
+                @item={{item}}
+                @isActive={{eq index this.playbackIndex}}
+                @isMuted={{this.mediaMuted}}
+                 @shouldPreload={{this.isWithinPreloadWindow index}}
+                 @replyCount={{this.replyCountFor item}}
+                 @commentsOpen={{eq
+                   item.post_id
+                   this.commentsSurfaceItem.post_id
+                 }}
+                 @commentsPanelId={{if
+                   this.isDesktopLayout
+                   "video-shorts-comments-panel"
+                 }}
+                 @onOpenComments={{this.openComments}}
+                @onToggleMute={{this.toggleMute}}
+              />
+            {{else}}
+              <div
+                class="video-shorts-feed__item-placeholder"
+                aria-hidden="true"
+                inert
+              ></div>
+            {{/if}}
           </li>
         {{/each}}
       </ol>
 
+      <nav
+        class="video-shorts-feed__navigation"
+        aria-label={{i18n "video_shorts.feed.navigation"}}
+      >
+        <button
+          type="button"
+          class="video-shorts-feed__navigation-button"
+          data-action="previous-video"
+          aria-label={{i18n "video_shorts.feed.previous"}}
+          disabled={{not this.hasPreviousItem}}
+          {{on "click" this.showPreviousItem}}
+        >
+          {{dIcon "chevron-up"}}
+        </button>
+        <button
+          type="button"
+          class="video-shorts-feed__navigation-button"
+          data-action="next-video"
+          aria-label={{i18n "video_shorts.feed.next"}}
+          disabled={{not this.hasNextItem}}
+          {{on "click" this.showNextItem}}
+        >
+          {{dIcon "chevron-down"}}
+        </button>
+      </nav>
+
       {{#if this.showDesktopCommentsPanel}}
         <aside
+          id="video-shorts-comments-panel"
           class="video-shorts-comments-panel"
           style={{this.commentsAccentStyle}}
           data-comments-post-id={{this.commentsSurfaceItem.post_id}}
@@ -863,11 +1086,20 @@ export default class VideoShortsFeed extends Component {
             tabindex="0"
             {{on "wheel" this.handleCommentsPanelWheel}}
           >
-            <VideoShortsCommentsSurface
-              @item={{this.commentsSurfaceItem}}
-              @replyCount={{this.replyCountFor this.commentsSurfaceItem}}
-              @onCommentMutation={{this.handleActiveCommentMutation}}
-            />
+            {{#if this.CommentsSurfaceComponent}}
+              <this.CommentsSurfaceComponent
+                @item={{this.commentsSurfaceItem}}
+                @replyCount={{this.replyCountFor this.commentsSurfaceItem}}
+                @onCommentMutation={{this.handleActiveCommentMutation}}
+              />
+            {{else}}
+              <div
+                class="video-shorts-comments-surface__status"
+                role="status"
+              >
+                {{i18n "video_shorts.comments.loading"}}
+              </div>
+            {{/if}}
           </div>
 
         </aside>

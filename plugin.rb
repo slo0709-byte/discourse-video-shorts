@@ -13,7 +13,6 @@ register_asset "stylesheets/common/video-shorts-route-shell.scss"
 register_svg_icon "arrows-rotate"
 register_svg_icon "triangle-exclamation"
 register_svg_icon "up-right-from-square"
-register_svg_icon "video"
 register_svg_icon "volume-high"
 register_svg_icon "volume-xmark"
 

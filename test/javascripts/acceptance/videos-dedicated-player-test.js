@@ -327,6 +327,12 @@ acceptance("Video Shorts dedicated playback surface", function (needs) {
     assert.dom('[data-action="sound"]').doesNotExist();
     assert.dom('[data-action="music"]').doesNotExist();
     assert
+      .dom('[data-action="open-comments"]')
+      .hasAttribute("aria-expanded", "false");
+    assert
+      .dom('[data-action="open-comments"]')
+      .hasAttribute("aria-controls", "video-shorts-comments-panel");
+    assert
       .dom('[data-action="open-topic"]')
       .hasAttribute("href", "/t/youtube-short/101/1");
     assert
